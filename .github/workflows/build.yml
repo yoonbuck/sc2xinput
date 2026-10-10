@@ -1,0 +1,96 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.rid }})
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        # x64 only: Nefarius.ViGEm.Client bundles native vigemclient.dll for x86/x64 but not ARM64.
+        rid: [win-x64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          } else {
+            $version = "0.0.0-ci.$env:GITHUB_RUN_NUMBER"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Publish
+        shell: pwsh
+        env:
+          RID: ${{ matrix.rid }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $common = @('sc2xinput.csproj', '-c', 'Release', '-r', $env:RID, "-p:Version=$env:VERSION",
+                      '-p:PublishSingleFile=true', '-p:DebugType=embedded')
+
+          # Standalone: bundles the .NET runtime, nothing else to install besides ViGEmBus.
+          dotnet publish @common --self-contained -p:EnableCompressionInSingleFile=true -o publish/standalone
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          # Small build for machines that already have the .NET 10 Desktop Runtime.
+          dotnet publish @common --no-self-contained -o publish/framework-dependent
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          New-Item -ItemType Directory dist | Out-Null
+          foreach ($flavor in 'standalone', 'framework-dependent') {
+            Copy-Item README.md "publish/$flavor/"
+            $suffix = if ($flavor -eq 'standalone') { '' } else { "-$flavor" }
+            Compress-Archive -Path "publish/$flavor/*" -DestinationPath "dist/sc2xinput-$env:VERSION-$env:RID$suffix.zip"
+          }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          foreach ($exe in 'publish/standalone/sc2xinput.exe', 'publish/framework-dependent/sc2xinput.exe') {
+            # GUI-subsystem exe: redirect so the output is captured and the step waits for it.
+            $out = & $exe --help | Out-String
+            if ($LASTEXITCODE -or $out -notmatch 'sc2xinput') { throw "$exe --help failed: $out" }
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sc2xinput-${{ matrix.rid }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/*.zip --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag

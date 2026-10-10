@@ -1,5 +1,7 @@
 # sc2xinput
 
+[![Build](https://github.com/yoonbuck/sc2xinput/actions/workflows/build.yml/badge.svg)](https://github.com/yoonbuck/sc2xinput/actions/workflows/build.yml)
+
 Exposes Steam Controllers (1st gen; wired, or through the wireless dongle) as virtual Xbox 360
 controllers. Anything that understands XInput, Windows.Gaming.Input (UWP / Xbox app games),
 GameInput, or the browser Gamepad API will see a normal Xbox controller. Steam doesn't have to be running.
@@ -7,9 +9,22 @@ GameInput, or the browser Gamepad API will see a normal Xbox controller. Steam d
 ## Requirements
 
 - [ViGEmBus](https://github.com/nefarius/ViGEmBus) driver: `winget install ViGEm.ViGEmBus`
-- .NET 10 runtime (SDK to build)
+
+## Download
+
+Grab a zip from [Releases](https://github.com/yoonbuck/sc2xinput/releases), extract it anywhere, and run `sc2xinput.exe`.
+
+- `sc2xinput-<version>-win-x64.zip`: standalone, no .NET install needed (~45 MB)
+- `sc2xinput-<version>-win-x64-framework-dependent.zip`: tiny, but needs the
+  [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
+- No native ARM64 build: the ViGEm client library only ships x86/x64 native code.
+
+Builds of every commit to `main` are attached to the [Build workflow](https://github.com/yoonbuck/sc2xinput/actions/workflows/build.yml) runs.
+To cut a release, push a tag like `v1.0.0`.
 
 ## Build / run
+
+Requires the .NET 10 SDK. Open `sc2xinput.sln` in Visual Studio, or:
 
 ```
 dotnet build -c Release
