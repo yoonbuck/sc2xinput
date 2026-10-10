@@ -1,0 +1,75 @@
+# sc2xinput
+
+Exposes Steam Controllers (1st gen; wired, or through the wireless dongle) as virtual Xbox 360
+controllers. Anything that understands XInput, Windows.Gaming.Input (UWP / Xbox app games),
+GameInput, or the browser Gamepad API will see a normal Xbox controller. Steam doesn't have to be running.
+
+## Requirements
+
+- [ViGEmBus](https://github.com/nefarius/ViGEmBus) driver: `winget install ViGEm.ViGEmBus`
+- .NET 10 runtime (SDK to build)
+
+## Build / run
+
+```
+dotnet build -c Release
+bin\Release\net10.0-windows\sc2xinput.exe
+```
+
+The app runs in the notification area. Its icon is bright while a controller is bridged, dimmed
+while waiting for one, and crossed out while paused. Click it for the menu:
+
+- **Status**: connected controllers and their XInput player numbers
+- **Enabled**: uncheck to pause, which hands the controller back to its built-in mouse/keyboard mode
+- **Start with Windows**: adds or removes a per-user Run entry for the exe at its current path
+- **Edit config** / **Reload config**: open `sc2xinput.json`, then apply your changes without restarting
+- **Open log**: `sc2xinput.log` next to the exe
+
+Each connected Steam Controller gets its own virtual pad, and controllers can be plugged in or
+turned on while the app runs. The app turns off the controller's built-in keyboard/mouse
+emulation ("lizard mode") while it's running and turns it back on when you pause or exit.
+
+Quit Steam while using this: Steam drives the controller too, and its desktop layout will
+fight with this app.
+
+### Command-line modes
+
+```
+sc2xinput --console    run in a console window instead of the tray (Ctrl+C to quit)
+sc2xinput --dump       print decoded raw reports, for debugging
+sc2xinput --restore    turn mouse/keyboard mode back on (if the app was killed without cleaning up)
+```
+
+The exe is a GUI app, so cmd/PowerShell don't wait for it: its output appears after the next
+prompt. Ctrl+C in that terminal still stops it.
+
+## Default mapping
+
+| Steam Controller      | Xbox 360                         |
+|-----------------------|----------------------------------|
+| A / B / X / Y         | A / B / X / Y                    |
+| Bumpers / triggers    | LB / RB, analog LT / RT          |
+| Back / Start / Steam  | Back / Start / Guide             |
+| Stick (+ click)       | Left stick (L3)                  |
+| Left pad (click)      | D-pad, 8-way                     |
+| Right pad (+ click)   | Right stick, absolute position (R3) |
+| Left / right grip     | L3 / R3                          |
+| Rumble                | Haptic pulses (large motor → left pad, small → right) |
+
+## Config
+
+`sc2xinput.json` next to the exe (written with defaults on first run):
+
+- `LeftGrip`, `RightGrip`, `SteamButton`, `RightPadClick`: any of `A B X Y LeftShoulder RightShoulder
+  Back Start Guide LeftThumb RightThumb DPadUp DPadDown DPadLeft DPadRight None`
+  (combine with commas, e.g. `"A, B"`).
+- `LeftPadRequiresClick`: `false` makes the D-pad respond to touch instead of click.
+- `LeftPadDeadzone`, `RightPadDeadzone`, `StickDeadzone`: fraction of full range (0–1).
+- `RightPadSensitivity`: values above 1 reach full deflection before your thumb hits the pad's edge.
+- `RightPadMode`: `Stick` or `None`.
+- `Rumble`, `RumbleStrength`.
+
+## Limitations
+
+- Bluetooth LE mode (controllers flashed with the BLE firmware) isn't supported; use the dongle or a cable.
+- Gyro isn't mapped.

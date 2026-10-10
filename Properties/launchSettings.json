@@ -1,0 +1,19 @@
+{
+  "profiles": {
+    "Tray": {
+      "commandName": "Project"
+    },
+    "Console": {
+      "commandName": "Project",
+      "commandLineArgs": "--console"
+    },
+    "Dump raw reports": {
+      "commandName": "Project",
+      "commandLineArgs": "--dump"
+    },
+    "Restore mouse/keyboard mode": {
+      "commandName": "Project",
+      "commandLineArgs": "--restore"
+    }
+  }
+}
