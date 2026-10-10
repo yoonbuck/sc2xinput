@@ -17,7 +17,7 @@ Grab a zip from [Releases](https://github.com/yoonbuck/sc2xinput/releases), extr
 - `sc2xinput-<version>-win-x64.zip`: standalone, no .NET install needed (~45 MB)
 - `sc2xinput-<version>-win-x64-framework-dependent.zip`: tiny, but needs the
   [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
-- `win-arm64` variants for ARM PCs
+- No native ARM64 build: the ViGEm client library only ships x86/x64 native code.
 
 Builds of every commit to `main` are attached to the [Build workflow](https://github.com/yoonbuck/sc2xinput/actions/workflows/build.yml) runs.
 To cut a release, push a tag like `v1.0.0`.
