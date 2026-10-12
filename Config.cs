@@ -27,6 +27,8 @@ internal enum XButtons : ushort
 
 internal enum RightPadMode
 {
+    /// <summary>Finger speed drives the stick, like Steam's Joystick Mouse: swipes turn the camera, a still finger stops it.</summary>
+    Camera,
     /// <summary>Finger position on the pad is the stick position.</summary>
     Stick,
     /// <summary>Right pad does nothing (e.g. if you only want the stick).</summary>
@@ -45,9 +47,24 @@ internal sealed class Config
     /// <summary>Fraction of the pad radius around the center that registers no direction.</summary>
     public double LeftPadDeadzone { get; set; } = 0.25;
 
-    public RightPadMode RightPadMode { get; set; } = RightPadMode.Stick;
+    public RightPadMode RightPadMode { get; set; } = RightPadMode.Camera;
+
+    /// <summary>Camera mode: stick deflection per unit of finger speed (pad radii per second).</summary>
+    public double CameraSensitivity { get; set; } = 0.25;
+    /// <summary>Camera mode: deflection that any real movement starts at, to get past the game's stick deadzone.</summary>
+    public double CameraAntiDeadzone { get; set; } = 0.2;
+    /// <summary>Camera mode: finger speed (pad radii per second) below which movement is ignored as jitter.</summary>
+    public double CameraJitterThreshold { get; set; } = 0.15;
+    /// <summary>Camera mode: window over which finger speed is averaged. Higher is smoother but laggier.</summary>
+    public double CameraSmoothingMs { get; set; } = 30;
+    /// <summary>Camera mode: keep turning after a flick and coast to a stop, like a trackball.</summary>
+    public bool CameraTrackball { get; set; } = false;
+    /// <summary>Camera mode: how quickly trackball motion slows down (per second; higher stops sooner).</summary>
+    public double CameraTrackballFriction { get; set; } = 5;
+
+    /// <summary>Stick mode: fraction of the pad radius around the center that registers no deflection.</summary>
     public double RightPadDeadzone { get; set; } = 0.05;
-    /// <summary>Multiplier applied after the deadzone; >1 lets you reach full deflection before the pad's edge.</summary>
+    /// <summary>Stick mode: multiplier applied after the deadzone; >1 lets you reach full deflection before the pad's edge.</summary>
     public double RightPadSensitivity { get; set; } = 1.3;
 
     /// <summary>Radial deadzone for the physical stick. Most games apply their own, so default is 0.</summary>

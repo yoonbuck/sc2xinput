@@ -67,7 +67,7 @@ prompt. Ctrl+C in that terminal still stops it.
 | Back / Start / Steam  | Back / Start / Guide             |
 | Stick (+ click)       | Left stick (L3)                  |
 | Left pad (click)      | D-pad, 8-way                     |
-| Right pad (+ click)   | Right stick, absolute position (R3) |
+| Right pad (+ click)   | Right stick, camera-style: swipe speed sets deflection (R3) |
 | Left / right grip     | L3 / R3                          |
 | Rumble                | Haptic pulses (large motor → left pad, small → right) |
 
@@ -79,9 +79,22 @@ prompt. Ctrl+C in that terminal still stops it.
   Back Start Guide LeftThumb RightThumb DPadUp DPadDown DPadLeft DPadRight None`
   (combine with commas, e.g. `"A, B"`).
 - `LeftPadRequiresClick`: `false` makes the D-pad respond to touch instead of click.
-- `LeftPadDeadzone`, `RightPadDeadzone`, `StickDeadzone`: fraction of full range (0–1).
-- `RightPadSensitivity`: values above 1 reach full deflection before your thumb hits the pad's edge.
-- `RightPadMode`: `Stick` or `None`.
+- `LeftPadDeadzone`, `StickDeadzone`: fraction of full range (0–1).
+- `RightPadMode`:
+  - `Camera` (default): like Steam's Joystick Mouse. The stick deflects in proportion to how fast your
+    finger moves, so a swipe turns the camera by an amount proportional to its length, and a still
+    finger stops it.
+    - `CameraSensitivity`: deflection per pad-radius-per-second of finger speed (default 0.25, so
+      full deflection at about 4 radii/s). Pair it with the game's own look sensitivity.
+    - `CameraAntiDeadzone`: deflection that any movement starts at, to get past the game's own stick
+      deadzone. Lower it if slow movements are too fast, raise it if they do nothing.
+    - `CameraJitterThreshold`: finger speed (pad radii/s) below which movement is ignored, fading in up
+      to twice that. Raise it if the camera twitches while your thumb is resting.
+    - `CameraSmoothingMs`: averaging window for finger speed. Higher is smoother but laggier.
+    - `CameraTrackball`, `CameraTrackballFriction`: keep turning after a flick and coast to a stop.
+  - `Stick`: finger position on the pad is the stick position. Tuned with `RightPadDeadzone` and
+    `RightPadSensitivity` (above 1 reaches full deflection before your thumb hits the pad's edge).
+  - `None`.
 - `Rumble`, `RumbleStrength`.
 
 ## Limitations

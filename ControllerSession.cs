@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using Nefarius.ViGEm.Client;
 using Nefarius.ViGEm.Client.Targets;
+using Sc2XInput.Native;
 using Sc2XInput.SteamController;
 
 namespace Sc2XInput;
@@ -10,6 +12,7 @@ internal sealed class ControllerSession : IDisposable
     private const int RumbleTickMs = 50;
     private const ushort LargeMotorPeriodUs = 10_000; // ~100 Hz thump on the left pad
     private const ushort SmallMotorPeriodUs = 4_000;  // ~250 Hz buzz on the right pad
+    private const int CameraTickMs = 4; // camera output keeps changing between reports (smoothing, inertia)
 
     private readonly ScDevice _device;
     private readonly ViGEmClient _client;
@@ -17,7 +20,10 @@ internal sealed class ControllerSession : IDisposable
     private readonly ScInputState _state = new();
     private readonly object _lock = new();
     private readonly System.Threading.Timer? _rumbleTimer;
+    private readonly CameraPad? _camera;
+    private HighResTicker? _cameraTicker; // started on first connect, so empty dongle slots don't tick
     private IXbox360Controller? _pad;
+    private XState _mapped; // latest mapping of the physical controls; camera output is layered on top
     private XState _last;
     private volatile byte _largeMotor, _smallMotor;
 
@@ -39,6 +45,8 @@ internal sealed class ControllerSession : IDisposable
         _device.Closed += OnClosed;
         if (config.Rumble)
             _rumbleTimer = new System.Threading.Timer(_ => RumbleTick(), null, RumbleTickMs, RumbleTickMs);
+        if (config.RightPadMode == RightPadMode.Camera)
+            _camera = new CameraPad(config);
     }
 
     public void Start()
@@ -64,16 +72,25 @@ internal sealed class ControllerSession : IDisposable
             case ScProtocol.EvInput:
                 if (_pad == null) OnControllerConnected();
                 _state.Apply(d);
-                Submit(Mapper.Map(_state, _config));
+                _camera?.Update(_state.RPadTouched, _state.RPadX, _state.RPadY, Stopwatch.GetTimestamp());
+                lock (_lock) _mapped = Mapper.Map(_state, _config);
+                Submit();
                 break;
         }
     }
 
-    private void Submit(XState x)
+    private void Submit()
     {
         lock (_lock)
         {
-            if (_pad == null || x == _last) return;
+            if (_pad == null) return;
+            var x = _mapped;
+            if (_camera != null)
+            {
+                var (rx, ry) = _camera.Sample(Stopwatch.GetTimestamp());
+                x = x with { RightX = rx, RightY = ry };
+            }
+            if (x == _last) return;
             _last = x;
             _pad.SetButtonsFull((ushort)x.Buttons);
             _pad.LeftTrigger = x.LeftTrigger;
@@ -106,6 +123,9 @@ internal sealed class ControllerSession : IDisposable
             pad.SubmitReport();
             _pad = pad;
             _last = default;
+            _mapped = default;
+            if (_camera != null)
+                _cameraTicker ??= new HighResTicker(CameraTickMs, Submit, $"camera {_device.Name}");
 
             Log.Info($"[{_device.Name}] controller connected -> virtual Xbox 360 pad");
             Changed?.Invoke();
@@ -183,6 +203,7 @@ internal sealed class ControllerSession : IDisposable
 
     public void Dispose()
     {
+        _cameraTicker?.Dispose();
         _rumbleTimer?.Dispose();
         bool hadController;
         lock (_lock)
