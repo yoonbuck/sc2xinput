@@ -27,15 +27,20 @@ internal sealed class HighResTicker : IDisposable
     private readonly ManualResetEvent _stop = new(false);
     private readonly ManualResetEvent _enabled = new(true);
     private readonly Thread _thread;
+    private int _disposed;
 
     /// <summary>
     /// While false the thread parks without timer wakeups. Never blocks, so it is safe to set from code
-    /// holding a lock that the tick callback also takes.
+    /// holding a lock that the tick callback also takes. Ignored after <see cref="Dispose"/>.
     /// </summary>
     public bool Enabled
     {
-        get => _enabled.WaitOne(0);
-        set { if (value) _enabled.Set(); else _enabled.Reset(); }
+        get => Volatile.Read(ref _disposed) == 0 && _enabled.WaitOne(0);
+        set
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            if (value) _enabled.Set(); else _enabled.Reset();
+        }
     }
 
     public HighResTicker(int intervalMs, Action tick, string name)
@@ -57,7 +62,11 @@ internal sealed class HighResTicker : IDisposable
 
         _thread = new Thread(() =>
         {
+            // The worker owns the wait handles and disposes them on exit, so a tick that outlasts
+            // Dispose's join (e.g. Submit blocked on a lock) never comes back to disposed handles.
             using (timer)
+            using (_stop)
+            using (_enabled)
             {
                 var waits = new WaitHandle[] { timer, _stop };
                 var pausedWaits = new WaitHandle[] { _enabled, _stop };
@@ -91,9 +100,9 @@ internal sealed class HighResTicker : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _stop.Set();
+        // Best effort: if a tick is still running, the worker exits and cleans up after it returns.
         if (Thread.CurrentThread != _thread) _thread.Join(1000);
-        _stop.Dispose();
-        _enabled.Dispose();
     }
 }

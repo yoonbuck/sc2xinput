@@ -12,7 +12,7 @@ internal sealed class ControllerSession : IDisposable
     private const int RumbleTickMs = 50;
     private const ushort LargeMotorPeriodUs = 10_000; // ~100 Hz thump on the left pad
     private const ushort SmallMotorPeriodUs = 4_000;  // ~250 Hz buzz on the right pad
-    private const int CameraTickMs = 4; // camera output keeps changing between reports (smoothing, inertia)
+    private const int CameraTickMs = 4; // camera output can change between reports (inertia, fade-out when reports stop)
 
     private readonly ScDevice _device;
     private readonly ViGEmClient _client;
@@ -73,9 +73,27 @@ internal sealed class ControllerSession : IDisposable
                 if (_pad == null) OnControllerConnected();
                 _state.Apply(d);
                 _camera?.Update(_state.RPadTouched, _state.RPadX, _state.RPadY, Stopwatch.GetTimestamp());
-                lock (_lock) _mapped = Mapper.Map(_state, _config);
+                lock (_lock)
+                {
+                    _mapped = Mapper.Map(_state, _config);
+                    // Wake the ticker if CameraTick paused it while the pad was idle. After Update, so a
+                    // concurrent idle check can't pause it again for this touch.
+                    if (_camera?.IsActive == true && _pad != null && _cameraTicker != null) _cameraTicker.Enabled = true;
+                }
                 Submit();
                 break;
+        }
+    }
+
+    // Between reports the camera output only changes for trackball inertia or the fade-out when reports
+    // stop, so pause once the pad is idle and the stick has been centred.
+    private void CameraTick()
+    {
+        Submit();
+        lock (_lock)
+        {
+            if (!_camera!.IsActive && _last.RightX == 0 && _last.RightY == 0 && _cameraTicker != null)
+                _cameraTicker.Enabled = false;
         }
     }
 
@@ -91,7 +109,6 @@ internal sealed class ControllerSession : IDisposable
                 x = x with { RightX = rx, RightY = ry };
             }
             if (x == _last) return;
-            _last = x;
             _pad.SetButtonsFull((ushort)x.Buttons);
             _pad.LeftTrigger = x.LeftTrigger;
             _pad.RightTrigger = x.RightTrigger;
@@ -100,6 +117,7 @@ internal sealed class ControllerSession : IDisposable
             _pad.RightThumbX = x.RightX;
             _pad.RightThumbY = x.RightY;
             _pad.SubmitReport();
+            _last = x; // only once sent, so a failed submit is retried on the next tick
         }
     }
 
@@ -128,7 +146,7 @@ internal sealed class ControllerSession : IDisposable
             {
                 try
                 {
-                    _cameraTicker ??= new HighResTicker(CameraTickMs, Submit, $"camera {_device.Name}");
+                    _cameraTicker ??= new HighResTicker(CameraTickMs, CameraTick, $"camera {_device.Name}");
                     _cameraTicker.Enabled = true;
                 }
                 catch (System.ComponentModel.Win32Exception ex)

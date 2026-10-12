@@ -31,7 +31,8 @@ internal static class Log
             if (color is { } c) Console.ForegroundColor = c;
             Console.WriteLine(line);
             if (color != null) Console.ResetColor();
-            _file?.WriteLine(line);
+            try { _file?.WriteLine(line); }
+            catch (IOException) { } // disk full, file removed: logging must never take the app down
         }
     }
 }

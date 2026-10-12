@@ -70,7 +70,9 @@ internal sealed class CameraPad
             }
             else if (_inertiaX != 0 || _inertiaY != 0)
             {
-                var decay = Math.Exp(-_config.CameraTrackballFriction * (now - _inertiaT) / TicksPerSecond);
+                // Floor the friction: at 0 or below a flick would spin (or speed up) forever.
+                var friction = Math.Max(0.1, _config.CameraTrackballFriction);
+                var decay = Math.Exp(-friction * (now - _inertiaT) / TicksPerSecond);
                 _inertiaX *= decay;
                 _inertiaY *= decay;
                 _inertiaT = now;
