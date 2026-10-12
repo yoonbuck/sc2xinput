@@ -124,6 +124,11 @@ internal sealed class Bridge
                     _ignored.Add(path);
                     continue;
                 }
+                if (_stop.IsSet)
+                {
+                    device.Dispose(); // Stop began while this was opening
+                    break;
+                }
                 Log.Info($"[{device.Name}] found");
                 // Only the first session for a path inherits it: if the device re-enumerates later, it starts
                 // captured like any newly plugged-in controller.
@@ -164,20 +169,22 @@ internal sealed class Bridge
         // A scan may hold the lock while it closes sessions it is replacing; wait for it within the deadline.
         if (!Monitor.TryEnter(_sessions, Left()))
         {
-            // Don't leave sessions running: ask each published one to close itself (non-blocking; each loop
-            // unplugs and restores mouse mode). The scan sees _stop and won't start new ones.
+            // Don't leave sessions running: ask each published one to close itself now (non-blocking; each loop
+            // unplugs and restores mouse mode), and finish disposing them (HID readers, haptic workers) in the
+            // background once the scan lets go. The scan sees _stop and won't start new ones.
             foreach (var session in _published) session.Value.RequestClose();
             Log.Warn("shutdown timed out waiting for the device scan; run sc2xinput --restore if mouse mode is off");
+            Task.Run(() =>
+            {
+                lock (_sessions) CloseAllLocked(TimeSpan.FromSeconds(1));
+                RaiseChanged();
+            });
             return;
         }
         try
         {
-            if (_stopped) return;
-            _stopped = true;
             var loopBudget = Left() - TeardownAllowance;
-            CloseAll(_sessions.Values.ToList(), loopBudget > TimeSpan.Zero ? loopBudget : TimeSpan.Zero);
-            _sessions.Clear();
-            _published = [];
+            CloseAllLocked(loopBudget > TimeSpan.Zero ? loopBudget : TimeSpan.Zero);
         }
         finally
         {
@@ -185,6 +192,16 @@ internal sealed class Bridge
         }
         if (_thread != null && _thread != Thread.CurrentThread) _thread.Join(Left());
         RaiseChanged();
+    }
+
+    // Caller holds the _sessions lock.
+    private void CloseAllLocked(TimeSpan loopBudget)
+    {
+        if (_stopped) return;
+        _stopped = true;
+        CloseAll(_sessions.Values.ToList(), loopBudget);
+        _sessions.Clear();
+        _published = [];
     }
 
     // Raised from the scan thread and session loops; a throwing handler mustn't kill either.
