@@ -13,6 +13,8 @@ internal sealed class ControllerSession : IDisposable
     private const ushort LargeMotorPeriodUs = 10_000; // ~100 Hz thump on the left pad
     private const ushort SmallMotorPeriodUs = 4_000;  // ~250 Hz buzz on the right pad
     private const int CameraTickMs = 4; // camera output can change between reports (inertia, fade-out when reports stop)
+    // Physical buttons; excludes the touch/status bits that share the field.
+    private const ScButtons AnyButton = (ScButtons)0x7FFFFF & ~(ScButtons.LPadTouch | ScButtons.RPadTouch);
 
     private readonly ScDevice _device;
     private readonly ViGEmClient _client;
@@ -20,33 +22,46 @@ internal sealed class ControllerSession : IDisposable
     private readonly ScInputState _state = new();
     private readonly object _lock = new();
     private readonly System.Threading.Timer? _rumbleTimer;
-    private readonly CameraPad? _camera;
-    private HighResTicker? _cameraTicker; // created on first connect and paused while disconnected, so idle dongle slots don't tick
+    private readonly System.Threading.Timer _chordTimer;
+    private readonly CameraPad _camera;
+    private readonly SteamChords _chords;
+    private HighResTicker? _cameraTicker; // created when first needed and paused while idle or disconnected
     private IXbox360Controller? _pad;
+    private bool _present;        // a physical controller is connected (always true when wired)
+    private bool _captured;       // false: the user handed the controller back to mouse/keyboard mode
+    private bool _lizardPending;  // capture turned off; restore mouse/keyboard mode once all buttons are up
+    private bool _rightPadMuted;  // right pad ignored until the thumb lifts, after switching its mode
+    private RightPadMode _rightPadMode;
     private XState _mapped; // latest mapping of the physical controls; camera output is layered on top
     private XState _last;
     private volatile byte _largeMotor, _smallMotor;
 
     public ScDevice Device => _device;
     public bool IsClosed { get; private set; }
-    public bool HasController => _pad != null;
+    public bool HasController => _present;
+    public bool IsCaptured => _captured;
+    public RightPadMode RightPadMode => _rightPadMode;
     /// <summary>Zero-based XInput slot, once Windows has assigned one.</summary>
     public int? PlayerIndex { get; private set; }
 
-    /// <summary>Raised when the controller connects, disconnects or gets its player slot.</summary>
+    /// <summary>Raised when the controller connects, disconnects, gets its player slot or changes mode.</summary>
     public event Action? Changed;
 
-    public ControllerSession(ScDevice device, ViGEmClient client, Config config)
+    /// <param name="captured">False to start with capture off, e.g. to keep a paused controller paused across a config reload.</param>
+    public ControllerSession(ScDevice device, ViGEmClient client, Config config, bool captured = true)
     {
         _device = device;
         _client = client;
         _config = config;
+        _captured = captured;
+        _rightPadMode = config.RightPadMode;
+        _camera = new CameraPad(config);
+        _chords = new SteamChords(config.SteamChords);
+        _chordTimer = new System.Threading.Timer(_ => OnChordTimer());
         _device.ReportReceived += OnReport;
         _device.Closed += OnClosed;
         if (config.Rumble)
             _rumbleTimer = new System.Threading.Timer(_ => RumbleTick(), null, RumbleTickMs, RumbleTickMs);
-        if (config.RightPadMode == RightPadMode.Camera)
-            _camera = new CameraPad(config);
     }
 
     public void Start()
@@ -70,30 +85,112 @@ internal sealed class ControllerSession : IDisposable
                 OnControllerConnected();
                 break;
             case ScProtocol.EvInput:
-                if (_pad == null) OnControllerConnected();
-                _state.Apply(d);
-                _camera?.Update(_state.RPadTouched, _state.RPadX, _state.RPadY, Stopwatch.GetTimestamp());
+                if (!_present) OnControllerConnected();
                 lock (_lock)
                 {
-                    _mapped = Mapper.Map(_state, _config);
-                    // Wake the ticker if CameraTick paused it while the pad was idle. After Update, so a
-                    // concurrent idle check can't pause it again for this touch.
-                    if (_camera?.IsActive(Stopwatch.GetTimestamp()) == true && _pad != null && _cameraTicker != null) _cameraTicker.Enabled = true;
+                    // Reports keep arriving until Dispose closes the device; don't act on them after that.
+                    if (IsClosed) return;
+                    _state.Apply(d);
+                    _camera.Update(_state.RPadTouched, _state.RPadX, _state.RPadY, Stopwatch.GetTimestamp());
+                    // Wake the ticker if CameraTick paused it while the pad was idle.
+                    if (_rightPadMode == RightPadMode.Camera && _pad != null && _camera.IsActive(Stopwatch.GetTimestamp()))
+                        _cameraTicker?.Enabled = true;
+                    Remap();
                 }
                 Submit();
                 break;
         }
     }
 
+    // Caller holds _lock. Chords are processed even while not captured, so the toggle chord can recapture.
+    private void Remap()
+    {
+        var now = Stopwatch.GetTimestamp();
+        var chords = _chords.Process(_state.Buttons, now);
+        foreach (var action in chords.Actions) Run(action);
+        if (_rightPadMuted && !_state.RPadTouched) _rightPadMuted = false;
+        _mapped = Mapper.Map(_state, chords.Buttons, _config, _rightPadMuted ? RightPadMode.None : _rightPadMode);
+        // Enabling mouse/keyboard mode while a button is held makes the firmware type that button's key
+        // (Back is Tab), so wait until the chord has been fully released.
+        if (_lizardPending && (_state.Buttons & AnyButton) == 0)
+        {
+            _lizardPending = false;
+            _device.SetLizardMode(true);
+        }
+        if (chords.WakeAt is { } wake)
+            _chordTimer.Change(Math.Max(1, (wake - now) * 1000 / Stopwatch.Frequency + 1), Timeout.Infinite);
+    }
+
+    private void OnChordTimer()
+    {
+        lock (_lock)
+        {
+            if (IsClosed) return;
+            Remap();
+        }
+        Submit();
+    }
+
+    // Caller holds _lock.
+    private void Run(ChordAction action)
+    {
+        switch (action)
+        {
+            case ChordAction.ToggleCapture when _captured:
+                _captured = false;
+                DisconnectPad();
+                _lizardPending = true;
+                Log.Info($"[{_device.Name}] capture off: controller is back in mouse/keyboard mode");
+                Feedback(2, ScPad.Left, ScPad.Right);
+                Changed?.Invoke();
+                break;
+            case ChordAction.ToggleCapture:
+                _captured = true;
+                _lizardPending = false;
+                ConnectPad();
+                Log.Info($"[{_device.Name}] capture on");
+                Feedback(1, ScPad.Left, ScPad.Right);
+                break;
+            case ChordAction.CycleRightPadMode:
+                // Camera -> Stick -> Camera, passing through None only if that's what the config asks for.
+                _rightPadMode = _rightPadMode switch
+                {
+                    RightPadMode.Camera => RightPadMode.Stick,
+                    RightPadMode.Stick when _config.RightPadMode == RightPadMode.None => RightPadMode.None,
+                    _ => RightPadMode.Camera,
+                };
+                // The chord is a click with the thumb on the pad; in Stick mode that position would
+                // immediately deflect the stick, so ignore the pad until the thumb lifts.
+                _rightPadMuted = _state.RPadTouched;
+                if (_rightPadMode == RightPadMode.Camera && _pad != null) EnsureCameraTicker();
+                else _cameraTicker?.Enabled = false;
+                Log.Info($"[{_device.Name}] right pad mode: {_rightPadMode}");
+                Feedback(_rightPadMode switch { RightPadMode.Camera => 1, RightPadMode.Stick => 2, _ => 3 }, ScPad.Right);
+                Changed?.Invoke();
+                break;
+        }
+    }
+
+    /// <summary>Confirmation buzz: <paramref name="ticks"/> short pulses on the given pads.</summary>
+    // Delayed so it isn't masked by the physical click of the chord button.
+    private void Feedback(int ticks, params ScPad[] pads) => _ = Task.Run(async () =>
+    {
+        for (var i = 0; i < ticks; i++)
+        {
+            await Task.Delay(i == 0 ? 250 : 200);
+            foreach (var pad in pads) _device.HapticPulse(pad, 2000, 2000, 10); // 40 ms at 250 Hz
+        }
+    });
+
     // Between reports the camera output only changes for trackball inertia or the fade-out when reports
-    // stop, so pause once the pad is idle and the stick has been centred.
+    // stop, so pause once the pad is idle and the stick has been centred. The next touch wakes it.
     private void CameraTick()
     {
         Submit();
         lock (_lock)
         {
-            if (!_camera!.IsActive(Stopwatch.GetTimestamp()) && _last.RightX == 0 && _last.RightY == 0 && _cameraTicker != null)
-                _cameraTicker.Enabled = false;
+            if (!_camera.IsActive(Stopwatch.GetTimestamp()) && _last.RightX == 0 && _last.RightY == 0)
+                _cameraTicker?.Enabled = false;
         }
     }
 
@@ -103,7 +200,7 @@ internal sealed class ControllerSession : IDisposable
         {
             if (_pad == null) return;
             var x = _mapped;
-            if (_camera != null)
+            if (_rightPadMode == RightPadMode.Camera && !_rightPadMuted)
             {
                 var (rx, ry) = _camera.Sample(Stopwatch.GetTimestamp());
                 x = x with { RightX = rx, RightY = ry };
@@ -125,40 +222,54 @@ internal sealed class ControllerSession : IDisposable
     {
         lock (_lock)
         {
-            if (_pad != null || IsClosed) return;
-            if (!_device.SetLizardMode(false))
-                Log.Warn($"[{_device.Name}] could not disable lizard mode; trackpad may still move the mouse");
-
-            var pad = _client.CreateXbox360Controller();
-            pad.AutoSubmitReport = false;
-            pad.FeedbackReceived += (_, e) => { _largeMotor = e.LargeMotor; _smallMotor = e.SmallMotor; };
-            pad.Connect();
-            // Until the driver gets a report that differs from all-zero, XInput reports junk stick values
-            // for a new pad. Nudge it so the idle state reads as neutral before any input arrives.
-            pad.LeftThumbX = 1;
-            pad.SubmitReport();
-            pad.LeftThumbX = 0;
-            pad.SubmitReport();
-            _pad = pad;
-            _last = default;
-            _mapped = default;
-            if (_camera != null)
-            {
-                try
-                {
-                    _cameraTicker ??= new HighResTicker(CameraTickMs, CameraTick, $"camera {_device.Name}");
-                    _cameraTicker.Enabled = true;
-                }
-                catch (System.ComponentModel.Win32Exception ex)
-                {
-                    // Camera output still updates on every report; it just won't settle between them.
-                    Log.Warn($"[{_device.Name}] {ex.Message}; camera mode will only update on input reports");
-                }
-            }
-
-            Log.Info($"[{_device.Name}] controller connected -> virtual Xbox 360 pad");
+            if (_present || IsClosed) return;
+            _present = true;
+            Log.Info($"[{_device.Name}] controller connected");
+            if (_captured) ConnectPad();
+            else Log.Info($"[{_device.Name}] capture is off, leaving it in mouse/keyboard mode");
             Changed?.Invoke();
-            _ = LogPlayerIndexAsync(pad);
+        }
+    }
+
+    // Caller holds _lock.
+    private void ConnectPad()
+    {
+        if (_pad != null || IsClosed) return;
+        if (!_device.SetLizardMode(false))
+            Log.Warn($"[{_device.Name}] could not disable lizard mode; trackpad may still move the mouse");
+
+        var pad = _client.CreateXbox360Controller();
+        pad.AutoSubmitReport = false;
+        pad.FeedbackReceived += (_, e) => { _largeMotor = e.LargeMotor; _smallMotor = e.SmallMotor; };
+        pad.Connect();
+        // Until the driver gets a report that differs from all-zero, XInput reports junk stick values
+        // for a new pad. Nudge it so the idle state reads as neutral before any input arrives.
+        pad.LeftThumbX = 1;
+        pad.SubmitReport();
+        pad.LeftThumbX = 0;
+        pad.SubmitReport();
+        _pad = pad;
+        _last = default;
+        _mapped = default; // don't replay input from before a disconnect
+        EnsureCameraTicker();
+
+        Log.Info($"[{_device.Name}] -> virtual Xbox 360 pad");
+        Changed?.Invoke();
+        _ = LogPlayerIndexAsync(pad);
+    }
+
+    private void EnsureCameraTicker()
+    {
+        if (_rightPadMode != RightPadMode.Camera) return;
+        try
+        {
+            _cameraTicker ??= new HighResTicker(CameraTickMs, CameraTick, $"camera {_device.Name}");
+            _cameraTicker.Enabled = true;
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            // Camera output still updates on every report; it just won't settle between them.
+            Log.Warn($"[{_device.Name}] {ex.Message}; camera mode will only update on input reports");
         }
     }
 
@@ -184,12 +295,18 @@ internal sealed class ControllerSession : IDisposable
     {
         lock (_lock)
         {
-            if (_pad == null) return;
+            if (!_present) return;
+            _present = false;
             DisconnectPad();
+            // Buttons held when it dropped out are not still held when it wakes.
+            _chords.Reset();
+            _rightPadMuted = false;
             Log.Info($"[{_device.Name}] controller disconnected");
+            Changed?.Invoke();
         }
     }
 
+    // Caller holds _lock.
     private void DisconnectPad()
     {
         if (_pad == null) return;
@@ -207,9 +324,11 @@ internal sealed class ControllerSession : IDisposable
     {
         lock (_lock)
         {
-            if (_pad != null) Log.Info($"[{_device.Name}] device removed");
+            if (_present) Log.Info($"[{_device.Name}] device removed");
+            _present = false;
             DisconnectPad();
             IsClosed = true;
+            Changed?.Invoke(); // DisconnectPad doesn't notify when capture was off and there was no pad
         }
     }
 
@@ -235,12 +354,14 @@ internal sealed class ControllerSession : IDisposable
     public void Dispose()
     {
         _rumbleTimer?.Dispose();
+        _chordTimer.Dispose();
         bool hadController;
         lock (_lock)
         {
-            hadController = _pad != null;
+            hadController = _pad != null || _lizardPending;
             DisconnectPad();
-            IsClosed = true;
+            _present = false;
+            IsClosed = true; // from here on, reports and timer callbacks are ignored
         }
         // After DisconnectPad (which pauses the ticker) so it never touches a disposed one, and outside
         // the lock because the tick takes it and Dispose joins the thread.

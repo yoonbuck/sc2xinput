@@ -70,11 +70,12 @@ internal sealed class TrayApp : ApplicationContext
                 "Steam also drives the Steam Controller and may fight over it. Quit Steam for best results.", ToolTipIcon.Warning);
     }
 
-    private void SetEnabled(bool enabled)
+    /// <param name="uncaptured">Controllers to keep in mouse/keyboard mode (capture off) in the new bridge.</param>
+    private void SetEnabled(bool enabled, IReadOnlySet<string>? uncaptured = null)
     {
         if (enabled && _bridge == null)
         {
-            _bridge = new Bridge(_client, _config);
+            _bridge = new Bridge(_client, _config, uncaptured);
             _bridge.Changed += () => _ui.Post(_ => UpdateStatus(), null);
             _bridge.Start();
             Log.Info("Bridge enabled");
@@ -102,23 +103,32 @@ internal sealed class TrayApp : ApplicationContext
         }
         Log.Info("Config reloaded");
         if (_bridge == null) return;
+        // Restart with the new config, but leave controllers the user handed back to mouse mode alone.
+        var uncaptured = _bridge.UncapturedDevices;
         SetEnabled(false);
-        SetEnabled(true);
+        SetEnabled(true, uncaptured);
     }
 
     private void UpdateStatus()
     {
         var controllers = _bridge?.Controllers ?? [];
-        var state = _bridge == null ? IconState.Paused : controllers.Count > 0 ? IconState.Active : IconState.Waiting;
+        var state = _bridge == null ? IconState.Paused : controllers.Any(c => c.Captured) ? IconState.Active : IconState.Waiting;
         _tray.Text = state switch
         {
             IconState.Paused => "sc2xinput: paused",
-            IconState.Waiting => "sc2xinput: no controllers",
-            _ => "sc2xinput: " + string.Join(", ", controllers.Select(c => c.Player is { } p ? $"player {p + 1}" : "connecting")),
+            IconState.Waiting when controllers.Count == 0 => "sc2xinput: no controllers",
+            _ => "sc2xinput: " + string.Join(", ", controllers.Select(ShortStatus)),
         };
         SetIcon(state);
         if (_menu.Visible) RefreshMenu();
     }
+
+    private static string ShortStatus(ControllerInfo c) =>
+        !c.Captured ? "mouse mode"
+        : c.Player is { } p ? $"player {p + 1}, {c.RightPadMode.ToString().ToLowerInvariant()}"
+        : "connecting";
+
+    private static string Capitalize(string s) => char.ToUpperInvariant(s[0]) + s[1..];
 
     private void RefreshMenu()
     {
@@ -136,7 +146,7 @@ internal sealed class TrayApp : ApplicationContext
             _statusItems.Add(new ToolStripMenuItem("No controllers connected") { Enabled = false });
         else
             foreach (var c in controllers)
-                _statusItems.Add(new ToolStripMenuItem($"{(c.Player is { } p ? $"Player {p + 1}" : "Connecting")}: {c.Name}") { Enabled = false });
+                _statusItems.Add(new ToolStripMenuItem($"{Capitalize(ShortStatus(c))}: {c.Name}") { Enabled = false });
 
         for (var i = 0; i < _statusItems.Count; i++) _menu.Items.Insert(i, _statusItems[i]);
         _enabledItem.Checked = _bridge != null;
