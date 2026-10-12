@@ -72,10 +72,26 @@ internal sealed class HighResTicker : IDisposable
                 var pausedWaits = new WaitHandle[] { _enabled, _stop };
                 var due = -10_000L * intervalMs; // relative, in 100 ns units
                 var failures = 0;
+                var armFailures = 0;
                 while (true)
                 {
-                    SetWaitableTimer(handle, due, 0, IntPtr.Zero, IntPtr.Zero, false);
-                    if (WaitHandle.WaitAny(waits) == 1) return;
+                    if (SetWaitableTimer(handle, due, 0, IntPtr.Zero, IntPtr.Zero, false))
+                    {
+                        if (armFailures > 0)
+                        {
+                            Log.Info($"{name} timer armed again after {armFailures} failures");
+                            armFailures = 0;
+                        }
+                        if (WaitHandle.WaitAny(waits) == 1) return;
+                    }
+                    else
+                    {
+                        // An unarmed timer would never signal; wait the interval on the stop event instead
+                        // (normal timer resolution) so ticks continue, and keep trying to re-arm.
+                        if (armFailures++ == 0)
+                            Log.Warn($"{name}: could not arm timer (error {Marshal.GetLastPInvokeError()}), ticking at reduced resolution");
+                        if (_stop.WaitOne(intervalMs)) return;
+                    }
                     if (!_enabled.WaitOne(0) && WaitHandle.WaitAny(pausedWaits) == 1) return;
                     try
                     {

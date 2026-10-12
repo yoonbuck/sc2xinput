@@ -36,10 +36,19 @@ internal sealed class CameraPad
         }
     }
 
-    /// <summary>True while output may change without new reports (finger down or inertia running).</summary>
-    public bool IsActive
+    /// <summary>
+    /// True while output may change without new reports: trackball inertia is running, or a finger is down
+    /// and still reporting. A touch whose reports stopped has faded to zero after the report gap plus one
+    /// window, so it no longer counts, which lets the ticker park until the next report.
+    /// </summary>
+    public bool IsActive(long now)
     {
-        get { lock (_lock) return _touched || _inertiaX != 0 || _inertiaY != 0; }
+        lock (_lock)
+        {
+            if (_inertiaX != 0 || _inertiaY != 0) return true;
+            if (!_touched || _history.Count == 0) return false;
+            return now - _history[^1].t < (long)(ReportGapSeconds * TicksPerSecond) + Window;
+        }
     }
 
     public void Update(bool touched, short x, short y, long timestamp)

@@ -78,7 +78,7 @@ internal sealed class ControllerSession : IDisposable
                     _mapped = Mapper.Map(_state, _config);
                     // Wake the ticker if CameraTick paused it while the pad was idle. After Update, so a
                     // concurrent idle check can't pause it again for this touch.
-                    if (_camera?.IsActive == true && _pad != null && _cameraTicker != null) _cameraTicker.Enabled = true;
+                    if (_camera?.IsActive(Stopwatch.GetTimestamp()) == true && _pad != null && _cameraTicker != null) _cameraTicker.Enabled = true;
                 }
                 Submit();
                 break;
@@ -92,7 +92,7 @@ internal sealed class ControllerSession : IDisposable
         Submit();
         lock (_lock)
         {
-            if (!_camera!.IsActive && _last.RightX == 0 && _last.RightY == 0 && _cameraTicker != null)
+            if (!_camera!.IsActive(Stopwatch.GetTimestamp()) && _last.RightX == 0 && _last.RightY == 0 && _cameraTicker != null)
                 _cameraTicker.Enabled = false;
         }
     }
