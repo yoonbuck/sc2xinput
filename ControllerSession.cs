@@ -384,7 +384,6 @@ internal sealed class ControllerSession : IDisposable
     public void Dispose()
     {
         _rumbleTimer?.Dispose();
-        _chordTimer.Dispose();
         bool hadController;
         lock (_lock)
         {
@@ -393,6 +392,9 @@ internal sealed class ControllerSession : IDisposable
             _present = false;
             IsClosed = true; // from here on, reports and timer callbacks are ignored
         }
+        // After IsClosed is set under the lock, so a report already inside Remap can't re-arm it once
+        // disposed (Timer.Change is documented to throw ObjectDisposedException then).
+        _chordTimer.Dispose();
         // After DisconnectPad (which pauses the ticker) so it never touches a disposed one, and outside
         // the lock because the tick takes it and Dispose joins the thread.
         _cameraTicker?.Dispose();
