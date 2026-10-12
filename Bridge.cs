@@ -169,14 +169,20 @@ internal sealed class Bridge
         TimeSpan Left() => TimeSpan.FromSeconds(Math.Max(0, deadline - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency);
 
         _stop.Set();
-        // A scan may hold the lock while it closes sessions it is replacing; wait for it within the deadline.
-        if (!Monitor.TryEnter(_sessions, Left()))
+        // Start every session unplugging and restoring mouse mode now (non-blocking; each loop does it by
+        // itself), rather than after waiting for a scan that may hold the lock.
+        foreach (var session in _published) session.Value.RequestClose();
+        // A scan may hold the lock while it closes sessions it is replacing; wait for it, keeping enough of the
+        // deadline to see the loops finish if it doesn't let go.
+        var lockBudget = Left() - TeardownAllowance;
+        if (!Monitor.TryEnter(_sessions, lockBudget > TimeSpan.Zero ? lockBudget : TimeSpan.Zero))
         {
-            // Don't leave sessions running: ask each published one to close itself now (non-blocking; each loop
-            // unplugs and restores mouse mode), and finish disposing them (HID readers, haptic workers) in the
-            // background once the scan lets go. The scan sees _stop and won't start new ones.
-            foreach (var session in _published) session.Value.RequestClose();
-            Log.Warn("shutdown timed out waiting for the device scan; run sc2xinput --restore if mouse mode is off");
+            Log.Warn("shutdown timed out waiting for the device scan");
+            foreach (var session in _published)
+                if (!session.Value.WaitClosed(Left()))
+                    Log.Warn($"[{session.Value.Device.Name}] session didn't close in time; run sc2xinput --restore if mouse mode is off");
+            // Finish disposing (HID readers, haptic workers) in the background once the scan lets go. The scan
+            // sees _stop and won't start new sessions.
             Task.Run(() =>
             {
                 lock (_sessions) CloseAllLocked(TimeSpan.FromSeconds(1));

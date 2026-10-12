@@ -109,6 +109,7 @@ internal sealed class ControllerSession : IDisposable
         if (_queue.Count >= MaxQueuedEvents && e is not (DeviceLost or Close))
         {
             _overflowed = true;
+            _queued.Set(); // the loop may have consumed the last signal already; wake it to fault
             return;
         }
         _queue.Enqueue(e);
@@ -336,6 +337,10 @@ internal sealed class ControllerSession : IDisposable
 
     /// <summary>Asks the loop to unplug and restore mouse mode, without waiting. See <see cref="Dispose(TimeSpan)"/>.</summary>
     public void RequestClose() => _closeRequested.Set();
+
+    /// <summary>Waits for the loop to finish closing (pad unplugged, mouse mode restored), without disposing.</summary>
+    public bool WaitClosed(TimeSpan timeout) =>
+        !_loop.IsAlive || Thread.CurrentThread == _loop || _loop.Join(timeout);
 
     public void Dispose() => Dispose(TimeSpan.FromSeconds(2));
 
