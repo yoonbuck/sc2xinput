@@ -25,7 +25,8 @@ internal sealed class ControllerSession : IDisposable
     private readonly ConcurrentQueue<SessionEvent> _queue = new();
     private readonly AutoResetEvent _queued = new(false);
     private readonly ManualResetEvent _closeRequested = new(false);
-    private readonly BlockingCollection<Haptic> _haptics = new();
+    // Bounded: if HID writes stall, drop pulses rather than let rumble lag ever further behind the game.
+    private readonly BlockingCollection<Haptic> _haptics = new(boundedCapacity: 16);
     private readonly Thread _loop;
     private readonly Thread _hapticWorker;
     private volatile SessionStatus _status;
@@ -42,6 +43,9 @@ internal sealed class ControllerSession : IDisposable
     public SessionStatus Status => _status;
 
     public bool IsClosed => _status.IsClosed;
+
+    /// <summary>The session closed because of an unexpected exception rather than device loss or shutdown.</summary>
+    public bool Faulted { get; private set; }
 
     /// <summary>Raised on the loop thread whenever <see cref="Status"/> changes.</summary>
     public event Action? Changed;
@@ -74,6 +78,8 @@ internal sealed class ControllerSession : IDisposable
     private void OnReport(ScDevice _, ReadOnlyMemory<byte> report)
     {
         var d = report.Span;
+        // Rare (startup and sleep/wake); logged raw for diagnosing slots that report connected wrongly.
+        if (d[2] == ScProtocol.EvConnection) Log.Info($"[{_device.Name}] connection report {Convert.ToHexString(d[..8])}");
         switch (d[2])
         {
             case ScProtocol.EvConnection when d[4] == ScProtocol.ConnDisconnected:
@@ -107,12 +113,13 @@ internal sealed class ControllerSession : IDisposable
             {
                 if (_closeRequested.WaitOne(0)) { Step(new Close()); break; }
 
+                WarnIfBackedUp(); // before draining, while a backlog is still visible
                 while (_queue.TryDequeue(out var e))
                 {
                     Step(e);
                     if (_closeRequested.WaitOne(0) || _core.Status.IsClosed) break;
                 }
-                WarnIfBackedUp();
+                if (_closeRequested.WaitOne(0)) continue; // straight to Close, no tick first
                 if (_core.NextDeadline is { } due && due <= Stopwatch.GetTimestamp()) Step(new Tick());
                 Publish();
                 if (_core.Status.IsClosed) break; // DeviceLost
@@ -123,12 +130,13 @@ internal sealed class ControllerSession : IDisposable
         catch (Exception ex)
         {
             // A bug in the core or here. Put the controller back the way we found it; the session reports
-            // closed, so Bridge replaces it with a fresh one on its next scan.
+            // closed, so Bridge replaces it on its next scan (keeping the user's capture choice).
             Log.Error($"[{_device.Name}] session failed: {ex}");
+            Faulted = true;
             Unplug();
             _device.SetLizardMode(true);
-            _status = _status with { IsClosed = true };
-            Changed?.Invoke();
+            _status = _status with { Present = false, IsClosed = true };
+            RaiseChanged();
             return;
         }
         Publish();
@@ -136,7 +144,10 @@ internal sealed class ControllerSession : IDisposable
 
     private void Step(SessionEvent e)
     {
+        var wasPresent = _core.Status.Present;
         var effects = _core.Step(e, Stopwatch.GetTimestamp());
+        if (!wasPresent && _core.Status.Present) LogWake(e);
+        if (wasPresent && e is DeviceLost) Log.Info($"[{_device.Name}] device removed");
         // The whole batch runs; failures are stepped back afterwards, in order, before anything else.
         _plugFailedInBatch = false;
         var failures = new List<Effect>();
@@ -145,12 +156,28 @@ internal sealed class ControllerSession : IDisposable
         foreach (var failed in failures) Step(new EffectFailed(failed));
     }
 
+    // Once, empty dongle slots reported "connected" when a controller woke on another slot, and the cause
+    // couldn't be reproduced. Record what woke each slot so it can be diagnosed if it happens again.
+    private void LogWake(SessionEvent e) => Log.Info(e switch
+    {
+        Input input => $"[{_device.Name}] woken by input report {Convert.ToHexString(input.Report.AsSpan(0, 12))}",
+        _ => $"[{_device.Name}] woken by {(_device.IsWireless ? "a connection event" : "startup (wired)")}",
+    });
+
     private void Publish()
     {
         var status = _core.Status;
         if (status == _status) return;
         _status = status;
-        Changed?.Invoke();
+        RaiseChanged();
+    }
+
+    // A throwing handler (e.g. the tray posting to a UI thread that has already exited) mustn't take the
+    // process down from this background thread.
+    private void RaiseChanged()
+    {
+        try { Changed?.Invoke(); }
+        catch (Exception ex) { Log.Warn($"[{_device.Name}] status handler failed: {ex.Message}"); }
     }
 
     private void WarnIfBackedUp()
@@ -177,7 +204,7 @@ internal sealed class ControllerSession : IDisposable
             case UnplugPad: Unplug(); return true;
             case Submit submit: return SubmitReport(submit.State);
             case SetLizard lizard: return _device.SetLizardMode(lizard.Enabled);
-            case Haptic haptic: _haptics.Add(haptic); return true;
+            case Haptic haptic: QueueHaptic(haptic); return true;
             case QueryPlayerIndex query: QueryPlayer(query.Generation); return true;
             default: throw new InvalidOperationException($"unknown effect {effect}");
         }
@@ -265,6 +292,13 @@ internal sealed class ControllerSession : IDisposable
     }
 
     // ---- haptics (worker thread) ----
+
+    // From the loop. Never blocks or throws: a full queue (stalled HID writes) or a closing session drops it.
+    private void QueueHaptic(Haptic haptic)
+    {
+        try { _haptics.TryAdd(haptic); }
+        catch (InvalidOperationException) { } // CompleteAdding already called by Dispose
+    }
 
     private void RunHaptics()
     {

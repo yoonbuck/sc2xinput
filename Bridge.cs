@@ -11,7 +11,8 @@ internal readonly record struct ControllerInfo(string Name, int? Player, bool Ca
 internal sealed class Bridge
 {
     private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(2);
-    // Windows gives a console-close / logoff handler ~5 s in total; sessions close in parallel within this.
+    // Windows gives a console-close / logoff handler ~5 s in total; sessions close in parallel, waiting up
+    // to this for their loops (plus up to ~1.2 s for device teardown).
     private static readonly TimeSpan StopBudget = TimeSpan.FromSeconds(2);
 
     private readonly ViGEmClient _client;
@@ -22,6 +23,8 @@ internal sealed class Bridge
     private volatile KeyValuePair<string, ControllerSession>[] _published = [];
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase); // non-vendor interfaces (keyboard/mouse)
     private readonly HashSet<string> _startUncaptured; // consumed as each device is first seen
+    private readonly Dictionary<string, int> _faults = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxFaults = 3;
     private readonly ManualResetEventSlim _stop = new(false);
     private Thread? _thread;
     private bool _stopped;
@@ -65,20 +68,34 @@ internal sealed class Bridge
 
     private void Scan()
     {
+        var changed = false;
         lock (_sessions)
         {
             if (_stopped) return;
             var present = Win32.GetHidDevicePaths().Where(ScDevice.IsCandidatePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var (path, session) in _sessions.ToList())
+            var doomed = _sessions.Where(s => s.Value.IsClosed || !present.Contains(s.Key)).ToList();
+            foreach (var (path, session) in doomed)
             {
-                if (session.IsClosed || !present.Contains(path))
+                _sessions.Remove(path);
+                if (!session.Faulted) continue;
+                // A replacement keeps the user's capture choice. A device that keeps faulting is left alone
+                // until it's plugged in again, rather than flapping a virtual pad every scan.
+                if (!session.Status.Captured) _startUncaptured.Add(path);
+                if ((_faults[path] = _faults.GetValueOrDefault(path) + 1) >= MaxFaults)
                 {
-                    session.Dispose();
-                    _sessions.Remove(path);
+                    Log.Error($"[{session.Device.Name}] failed {MaxFaults} times; ignoring it until it is reconnected");
+                    _ignored.Add(path);
                 }
             }
+            if (doomed.Count > 0)
+            {
+                _published = [.. _sessions];
+                CloseAll(doomed.Select(s => s.Value).ToList(), StopBudget);
+                changed = true;
+            }
             _ignored.IntersectWith(present);
+            foreach (var path in _faults.Keys.Where(p => !present.Contains(p)).ToList()) _faults.Remove(path);
 
             foreach (var path in present)
             {
@@ -95,10 +112,24 @@ internal sealed class Bridge
                 var session = new ControllerSession(device, _client, _config, captured: !_startUncaptured.Remove(path));
                 session.Changed += () => Changed?.Invoke();
                 _sessions[path] = session;
+                _published = [.. _sessions]; // before Start, so its first status change finds it listed
                 session.Start();
+                changed = true;
             }
-            _published = [.. _sessions];
         }
+        if (changed) Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Closes sessions in parallel: each unplugs its pad, restores mouse mode and closes its device. Bounded
+    /// so shutdown fits in the ~5 s Windows allows a console-close or logoff handler.
+    /// </summary>
+    private static void CloseAll(IReadOnlyCollection<ControllerSession> sessions, TimeSpan budget)
+    {
+        foreach (var session in sessions) session.RequestClose();
+        var closing = sessions.Select(s => Task.Run(() => s.Dispose(budget))).ToArray();
+        // Dispose waits up to the budget for the loop, then up to ~1.2 s for the haptic and reader threads.
+        Task.WaitAll(closing, budget + TimeSpan.FromSeconds(1.5));
     }
 
     /// <summary>
@@ -112,14 +143,7 @@ internal sealed class Bridge
         {
             if (_stopped) return;
             _stopped = true;
-            // Close every session at once, then wait for them all against one deadline.
-            foreach (var session in _sessions.Values) session.RequestClose();
-            var deadline = Stopwatch.GetTimestamp() + (long)(StopBudget.TotalSeconds * Stopwatch.Frequency);
-            foreach (var session in _sessions.Values)
-            {
-                var left = TimeSpan.FromSeconds(Math.Max(0, deadline - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency);
-                session.Dispose(left);
-            }
+            CloseAll(_sessions.Values.ToList(), StopBudget);
             _sessions.Clear();
             _published = [];
         }
