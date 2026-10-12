@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using Nefarius.ViGEm.Client;
 using Nefarius.ViGEm.Client.Targets;
+using Sc2XInput.Native;
 using Sc2XInput.SteamController;
 
 namespace Sc2XInput;
@@ -10,6 +12,7 @@ internal sealed class ControllerSession : IDisposable
     private const int RumbleTickMs = 50;
     private const ushort LargeMotorPeriodUs = 10_000; // ~100 Hz thump on the left pad
     private const ushort SmallMotorPeriodUs = 4_000;  // ~250 Hz buzz on the right pad
+    private const int CameraTickMs = 4; // camera output can change between reports (inertia, fade-out when reports stop)
 
     private readonly ScDevice _device;
     private readonly ViGEmClient _client;
@@ -17,7 +20,10 @@ internal sealed class ControllerSession : IDisposable
     private readonly ScInputState _state = new();
     private readonly object _lock = new();
     private readonly System.Threading.Timer? _rumbleTimer;
+    private readonly CameraPad? _camera;
+    private HighResTicker? _cameraTicker; // created on first connect and paused while disconnected, so idle dongle slots don't tick
     private IXbox360Controller? _pad;
+    private XState _mapped; // latest mapping of the physical controls; camera output is layered on top
     private XState _last;
     private volatile byte _largeMotor, _smallMotor;
 
@@ -39,6 +45,8 @@ internal sealed class ControllerSession : IDisposable
         _device.Closed += OnClosed;
         if (config.Rumble)
             _rumbleTimer = new System.Threading.Timer(_ => RumbleTick(), null, RumbleTickMs, RumbleTickMs);
+        if (config.RightPadMode == RightPadMode.Camera)
+            _camera = new CameraPad(config);
     }
 
     public void Start()
@@ -64,17 +72,43 @@ internal sealed class ControllerSession : IDisposable
             case ScProtocol.EvInput:
                 if (_pad == null) OnControllerConnected();
                 _state.Apply(d);
-                Submit(Mapper.Map(_state, _config));
+                _camera?.Update(_state.RPadTouched, _state.RPadX, _state.RPadY, Stopwatch.GetTimestamp());
+                lock (_lock)
+                {
+                    _mapped = Mapper.Map(_state, _config);
+                    // Wake the ticker if CameraTick paused it while the pad was idle. After Update, so a
+                    // concurrent idle check can't pause it again for this touch.
+                    if (_camera?.IsActive(Stopwatch.GetTimestamp()) == true && _pad != null && _cameraTicker != null) _cameraTicker.Enabled = true;
+                }
+                Submit();
                 break;
         }
     }
 
-    private void Submit(XState x)
+    // Between reports the camera output only changes for trackball inertia or the fade-out when reports
+    // stop, so pause once the pad is idle and the stick has been centred.
+    private void CameraTick()
+    {
+        Submit();
+        lock (_lock)
+        {
+            if (!_camera!.IsActive(Stopwatch.GetTimestamp()) && _last.RightX == 0 && _last.RightY == 0 && _cameraTicker != null)
+                _cameraTicker.Enabled = false;
+        }
+    }
+
+    private void Submit()
     {
         lock (_lock)
         {
-            if (_pad == null || x == _last) return;
-            _last = x;
+            if (_pad == null) return;
+            var x = _mapped;
+            if (_camera != null)
+            {
+                var (rx, ry) = _camera.Sample(Stopwatch.GetTimestamp());
+                x = x with { RightX = rx, RightY = ry };
+            }
+            if (x == _last) return;
             _pad.SetButtonsFull((ushort)x.Buttons);
             _pad.LeftTrigger = x.LeftTrigger;
             _pad.RightTrigger = x.RightTrigger;
@@ -83,6 +117,7 @@ internal sealed class ControllerSession : IDisposable
             _pad.RightThumbX = x.RightX;
             _pad.RightThumbY = x.RightY;
             _pad.SubmitReport();
+            _last = x; // only once sent, so a failed submit is retried on the next tick
         }
     }
 
@@ -106,6 +141,20 @@ internal sealed class ControllerSession : IDisposable
             pad.SubmitReport();
             _pad = pad;
             _last = default;
+            _mapped = default;
+            if (_camera != null)
+            {
+                try
+                {
+                    _cameraTicker ??= new HighResTicker(CameraTickMs, CameraTick, $"camera {_device.Name}");
+                    _cameraTicker.Enabled = true;
+                }
+                catch (System.ComponentModel.Win32Exception ex)
+                {
+                    // Camera output still updates on every report; it just won't settle between them.
+                    Log.Warn($"[{_device.Name}] {ex.Message}; camera mode will only update on input reports");
+                }
+            }
 
             Log.Info($"[{_device.Name}] controller connected -> virtual Xbox 360 pad");
             Changed?.Invoke();
@@ -149,6 +198,8 @@ internal sealed class ControllerSession : IDisposable
         catch (Exception ex) { Log.Warn($"[{_device.Name}] virtual pad disconnect failed: {ex.Message}"); }
         _pad = null;
         PlayerIndex = null;
+        _camera?.Reset(); // so a link drop mid-swipe or mid-coast doesn't resume with stale motion
+        _cameraTicker?.Enabled = false; // a sleeping wireless controller shouldn't keep a 4 ms timer going
         Changed?.Invoke();
     }
 
@@ -191,6 +242,9 @@ internal sealed class ControllerSession : IDisposable
             DisconnectPad();
             IsClosed = true;
         }
+        // After DisconnectPad (which pauses the ticker) so it never touches a disposed one, and outside
+        // the lock because the tick takes it and Dispose joins the thread.
+        _cameraTicker?.Dispose();
         // Give the controller its mouse/keyboard behavior back so it is usable without us.
         if (hadController) _device.SetLizardMode(true);
         _device.Dispose();
