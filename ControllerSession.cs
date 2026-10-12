@@ -198,6 +198,7 @@ internal sealed class ControllerSession : IDisposable
         catch (Exception ex) { Log.Warn($"[{_device.Name}] virtual pad disconnect failed: {ex.Message}"); }
         _pad = null;
         PlayerIndex = null;
+        _camera?.Reset(); // so a link drop mid-swipe or mid-coast doesn't resume with stale motion
         _cameraTicker?.Enabled = false; // a sleeping wireless controller shouldn't keep a 4 ms timer going
         Changed?.Invoke();
     }

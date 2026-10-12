@@ -50,7 +50,7 @@ internal sealed class Config
     public RightPadMode RightPadMode { get; set; } = RightPadMode.Camera;
 
     /// <summary>Camera mode: stick deflection per unit of finger speed (pad radii per second).</summary>
-    public double CameraSensitivity { get; set; } = 0.25;
+    public double CameraSensitivity { get; set; } = 0.27;
     /// <summary>Camera mode: deflection that any real movement starts at, to get past the game's stick deadzone.</summary>
     public double CameraAntiDeadzone { get; set; } = 0.2;
     /// <summary>Camera mode: finger speed (pad radii per second) below which movement is ignored as jitter.</summary>

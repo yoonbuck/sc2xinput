@@ -25,6 +25,17 @@ internal sealed class CameraPad
 
     private long Window => (long)(Math.Max(1, _config.CameraSmoothingMs) / 1000 * TicksPerSecond);
 
+    /// <summary>Forget the touch and any trackball motion, e.g. when the controller disconnects mid-swipe.</summary>
+    public void Reset()
+    {
+        lock (_lock)
+        {
+            _history.Clear();
+            _touched = false;
+            _inertiaX = _inertiaY = 0;
+        }
+    }
+
     /// <summary>True while output may change without new reports (finger down or inertia running).</summary>
     public bool IsActive
     {

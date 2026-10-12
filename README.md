@@ -84,7 +84,7 @@ prompt. Ctrl+C in that terminal still stops it.
   - `Camera` (default): like Steam's Joystick Mouse. The stick deflects in proportion to how fast your
     finger moves, so a swipe turns the camera by an amount proportional to its length, and a still
     finger stops it. Config files written by older versions still say `"Stick"`; change it to switch.
-    - `CameraSensitivity`: deflection per pad-radius-per-second of finger speed (default 0.25, so
+    - `CameraSensitivity`: deflection per pad-radius-per-second of finger speed (default 0.27, so
       full deflection at about 4 radii/s). Pair it with the game's own look sensitivity.
     - `CameraAntiDeadzone`: deflection that any movement starts at, to get past the game's own stick
       deadzone. Lower it if slow movements are too fast, raise it if they do nothing.
