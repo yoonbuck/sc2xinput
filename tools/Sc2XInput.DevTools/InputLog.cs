@@ -16,16 +16,17 @@ internal static class InputLog
     public static int Run(double seconds)
     {
         var gate = new object();
-        var previous = ScButtons.None;
-        var devices = Program.OpenControllers((_, r) =>
+        var previous = new Dictionary<ScDevice, ScButtons>(); // per interface, so two controllers don't mix
+        var devices = Program.OpenControllers((device, r) =>
         {
             var buttons = (ScButtons)(r[8] | (r[9] << 8) | (r[10] << 16)) & ~NotButtons;
             lock (gate)
             {
-                if (buttons == previous) return;
-                if ((buttons & ~previous) is var down and not 0) Console.WriteLine($"{Program.Now()} BUTTON {down} down");
-                if ((previous & ~buttons) is var up and not 0) Console.WriteLine($"{Program.Now()} BUTTON {up} up");
-                previous = buttons;
+                var before = previous.GetValueOrDefault(device);
+                if (buttons == before) return;
+                if ((buttons & ~before) is var down and not 0) Console.WriteLine($"{Program.Now()} [{device.Name}] BUTTON {down} down");
+                if ((before & ~buttons) is var up and not 0) Console.WriteLine($"{Program.Now()} [{device.Name}] BUTTON {up} up");
+                previous[device] = buttons;
             }
         });
 
