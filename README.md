@@ -27,9 +27,12 @@ To cut a release, push a tag like `v1.0.0`.
 Requires the .NET 10 SDK. Open `sc2xinput.sln` in Visual Studio, or:
 
 ```
-dotnet build -c Release
+dotnet build sc2xinput.csproj -c Release
 bin\Release\net10.0-windows\sc2xinput.exe
 ```
+
+Tests: `dotnet test --project tests/Sc2XInput.Tests`. Hardware diagnostics for checking changes on a real
+controller are in `tools/Sc2XInput.DevTools`; see [AGENTS.md](AGENTS.md) for the development workflow.
 
 The app runs in the notification area. Its icon is bright while a controller is bridged, dimmed
 while waiting for one, and crossed out while paused. Click it for the menu:
