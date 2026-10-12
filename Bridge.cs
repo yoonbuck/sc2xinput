@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Nefarius.ViGEm.Client;
 using Sc2XInput.Native;
 using Sc2XInput.SteamController;
@@ -10,19 +11,26 @@ internal readonly record struct ControllerInfo(string Name, int? Player, bool Ca
 internal sealed class Bridge
 {
     private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(2);
+    // Windows gives a console-close / logoff handler ~5 s in total; sessions close in parallel within this.
+    private static readonly TimeSpan StopBudget = TimeSpan.FromSeconds(2);
 
     private readonly ViGEmClient _client;
     private readonly Config _config;
+    // Owned by the scan (and Stop), under this lock. Readers use _published instead, so the tray never
+    // waits on a scan that is busy closing sessions.
     private readonly Dictionary<string, ControllerSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
+    private volatile KeyValuePair<string, ControllerSession>[] _published = [];
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase); // non-vendor interfaces (keyboard/mouse)
+    private readonly HashSet<string> _startUncaptured; // consumed as each device is first seen
     private readonly ManualResetEventSlim _stop = new(false);
     private Thread? _thread;
     private bool _stopped;
 
-    /// <summary>Raised from background threads whenever a controller connects, disconnects or gets a player slot.</summary>
+    /// <summary>
+    /// Raised from background threads whenever a controller's status changes. Handlers must not block on the
+    /// Bridge (the tray posts to its UI thread).
+    /// </summary>
     public event Action? Changed;
-
-    private readonly HashSet<string> _startUncaptured; // consumed as each device is first seen
 
     /// <param name="uncaptured">Device paths to start with capture off, see <see cref="UncapturedDevices"/>.</param>
     public Bridge(ViGEmClient client, Config config, IReadOnlySet<string>? uncaptured = null)
@@ -33,26 +41,15 @@ internal sealed class Bridge
     }
 
     /// <summary>Device paths of controllers whose capture is off (connected or asleep), to carry over to a new bridge.</summary>
-    public IReadOnlySet<string> UncapturedDevices
-    {
-        get
-        {
-            lock (_sessions)
-                return _sessions.Where(s => !s.Value.IsClosed && !s.Value.IsCaptured) // including asleep ones
-                    .Select(s => s.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        }
-    }
+    public IReadOnlySet<string> UncapturedDevices =>
+        _published.Where(s => s.Value.Status is { IsClosed: false, Captured: false })
+            .Select(s => s.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    public IReadOnlyList<ControllerInfo> Controllers
-    {
-        get
-        {
-            lock (_sessions)
-                return _sessions.Values.Where(s => s.HasController)
-                    .Select(s => new ControllerInfo(s.Device.Name, s.PlayerIndex, s.IsCaptured, s.RightPadMode))
-                    .OrderBy(c => c.Player ?? int.MaxValue).ToList();
-        }
-    }
+    public IReadOnlyList<ControllerInfo> Controllers =>
+        _published.Select(s => (s.Value.Device.Name, Status: s.Value.Status))
+            .Where(s => s.Status.Present)
+            .Select(s => new ControllerInfo(s.Name, s.Status.Player, s.Status.Captured, s.Status.Mode))
+            .OrderBy(c => c.Player ?? int.MaxValue).ToList();
 
     public void Start()
     {
@@ -100,6 +97,7 @@ internal sealed class Bridge
                 _sessions[path] = session;
                 session.Start();
             }
+            _published = [.. _sessions];
         }
     }
 
@@ -114,8 +112,16 @@ internal sealed class Bridge
         {
             if (_stopped) return;
             _stopped = true;
-            foreach (var session in _sessions.Values) session.Dispose();
+            // Close every session at once, then wait for them all against one deadline.
+            foreach (var session in _sessions.Values) session.RequestClose();
+            var deadline = Stopwatch.GetTimestamp() + (long)(StopBudget.TotalSeconds * Stopwatch.Frequency);
+            foreach (var session in _sessions.Values)
+            {
+                var left = TimeSpan.FromSeconds(Math.Max(0, deadline - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency);
+                session.Dispose(left);
+            }
             _sessions.Clear();
+            _published = [];
         }
         if (_thread != null && _thread != Thread.CurrentThread) _thread.Join(ScanInterval);
         Changed?.Invoke();

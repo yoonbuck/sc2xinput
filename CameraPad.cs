@@ -3,7 +3,7 @@ namespace Sc2XInput;
 /// <summary>
 /// Right-pad "camera" mode, like Steam's Joystick Mouse: the stick deflects in proportion to how fast the
 /// finger moves, so the camera turns by an amount proportional to the swipe distance and stops when the
-/// finger stops. Thread-safe: samples arrive on the reader thread, output is polled from a ticker.
+/// finger stops. Not thread-safe: owned by one session's loop.
 /// </summary>
 internal sealed class CameraPad
 {
@@ -13,7 +13,6 @@ internal sealed class CameraPad
     private static readonly double TicksPerSecond = System.Diagnostics.Stopwatch.Frequency;
 
     private readonly Config _config;
-    private readonly object _lock = new();
     // Touch samples covering the smoothing window ending at the newest sample, oldest first. The first one
     // is at or before the window start (or is the touch-down position if the touch is younger than that).
     private readonly List<(long t, double x, double y)> _history = [];
@@ -28,84 +27,72 @@ internal sealed class CameraPad
     /// <summary>Forget the touch and any trackball motion, e.g. when the controller disconnects mid-swipe.</summary>
     public void Reset()
     {
-        lock (_lock)
-        {
-            _history.Clear();
-            _touched = false;
-            _inertiaX = _inertiaY = 0;
-        }
+        _history.Clear();
+        _touched = false;
+        _inertiaX = _inertiaY = 0;
     }
 
     /// <summary>
     /// True while output may change without new reports: trackball inertia is running, or a finger is down
     /// and still reporting. A touch whose reports stopped has faded to zero after the report gap plus one
-    /// window, so it no longer counts, which lets the ticker park until the next report.
+    /// window, so it no longer counts, which lets the session go idle until the next report.
     /// </summary>
     public bool IsActive(long now)
     {
-        lock (_lock)
-        {
-            if (_inertiaX != 0 || _inertiaY != 0) return true;
-            if (!_touched || _history.Count == 0) return false;
-            return now - _history[^1].t < (long)(ReportGapSeconds * TicksPerSecond) + Window;
-        }
+        if (_inertiaX != 0 || _inertiaY != 0) return true;
+        if (!_touched || _history.Count == 0) return false;
+        return now - _history[^1].t < (long)(ReportGapSeconds * TicksPerSecond) + Window;
     }
 
     public void Update(bool touched, short x, short y, long timestamp)
     {
-        lock (_lock)
+        if (touched)
         {
-            if (touched)
+            if (!_touched)
             {
-                if (!_touched)
-                {
-                    _history.Clear();
-                    _inertiaX = _inertiaY = 0; // touching the pad stops the ball
-                }
-                _history.Add((timestamp, x / PadRadius, y / PadRadius));
-                Trim(timestamp);
-            }
-            else if (_touched)
-            {
-                if (_config.CameraTrackball)
-                {
-                    (_inertiaX, _inertiaY) = Velocity(timestamp);
-                    _inertiaT = timestamp;
-                }
                 _history.Clear();
+                _inertiaX = _inertiaY = 0; // touching the pad stops the ball
             }
-            _touched = touched;
+            _history.Add((timestamp, x / PadRadius, y / PadRadius));
+            Trim(timestamp);
         }
+        else if (_touched)
+        {
+            if (_config.CameraTrackball)
+            {
+                (_inertiaX, _inertiaY) = Velocity(timestamp);
+                _inertiaT = timestamp;
+            }
+            _history.Clear();
+        }
+        _touched = touched;
     }
 
     /// <summary>Right-stick output at <paramref name="now"/>.</summary>
     public (short x, short y) Sample(long now)
     {
-        lock (_lock)
+        double vx, vy;
+        if (_touched)
         {
-            double vx, vy;
-            if (_touched)
-            {
-                (vx, vy) = Velocity(now);
-            }
-            else if (_inertiaX != 0 || _inertiaY != 0)
-            {
-                // Floor the friction: at 0 or below a flick would spin (or speed up) forever.
-                var friction = Math.Max(0.1, _config.CameraTrackballFriction);
-                var decay = Math.Exp(-friction * (now - _inertiaT) / TicksPerSecond);
-                _inertiaX *= decay;
-                _inertiaY *= decay;
-                _inertiaT = now;
-                if (Math.Sqrt(_inertiaX * _inertiaX + _inertiaY * _inertiaY) < InertiaStopSpeed)
-                    _inertiaX = _inertiaY = 0;
-                (vx, vy) = (_inertiaX, _inertiaY);
-            }
-            else
-            {
-                return (0, 0);
-            }
-            return ToStick(vx, vy);
+            (vx, vy) = Velocity(now);
         }
+        else if (_inertiaX != 0 || _inertiaY != 0)
+        {
+            // Floor the friction: at 0 or below a flick would spin (or speed up) forever.
+            var friction = Math.Max(0.1, _config.CameraTrackballFriction);
+            var decay = Math.Exp(-friction * (now - _inertiaT) / TicksPerSecond);
+            _inertiaX *= decay;
+            _inertiaY *= decay;
+            _inertiaT = now;
+            if (Math.Sqrt(_inertiaX * _inertiaX + _inertiaY * _inertiaY) < InertiaStopSpeed)
+                _inertiaX = _inertiaY = 0;
+            (vx, vy) = (_inertiaX, _inertiaY);
+        }
+        else
+        {
+            return (0, 0);
+        }
+        return ToStick(vx, vy);
     }
 
     private void Trim(long latest)

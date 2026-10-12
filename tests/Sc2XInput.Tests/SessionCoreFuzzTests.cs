@@ -103,7 +103,8 @@ public class SessionCoreFuzzTests
 /// <summary>Keeps the core free of I/O, threads and the clock, so it stays deterministic and testable.</summary>
 public class SessionCorePurityTests
 {
-    private static readonly string[] CoreFiles = ["SessionCore.cs", "SessionEvents.cs", "InputTracker.cs", "OutputStage.cs"];
+    private static readonly string[] CoreFiles =
+        ["SessionCore.cs", "SessionEvents.cs", "InputTracker.cs", "OutputStage.cs", "CameraPad.cs", "SteamChords.cs", "Mapper.cs"];
 
     private static readonly string[] Forbidden =
     [
