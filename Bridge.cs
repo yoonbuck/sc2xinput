@@ -32,13 +32,13 @@ internal sealed class Bridge
         _startUncaptured = uncaptured ?? new HashSet<string>();
     }
 
-    /// <summary>Device paths of connected controllers whose capture is off, to carry over to a new bridge.</summary>
+    /// <summary>Device paths of controllers whose capture is off (connected or asleep), to carry over to a new bridge.</summary>
     public IReadOnlySet<string> UncapturedDevices
     {
         get
         {
             lock (_sessions)
-                return _sessions.Where(s => s.Value.HasController && !s.Value.IsCaptured)
+                return _sessions.Where(s => !s.Value.IsClosed && !s.Value.IsCaptured) // including asleep ones
                     .Select(s => s.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
     }

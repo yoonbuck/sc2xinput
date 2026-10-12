@@ -112,11 +112,9 @@ internal sealed class ControllerSession : IDisposable
         _mapped = Mapper.Map(_state, chords.Buttons, _config, _rightPadMuted ? RightPadMode.None : _rightPadMode);
         // Enabling mouse/keyboard mode while a button is held makes the firmware type that button's key
         // (Back is Tab), so wait until the chord has been fully released.
-        if (_lizardPending && (_state.Buttons & AnyButton) == 0)
-        {
+        // Stays pending until the commands go through, so a transient failure is retried on the next report.
+        if (_lizardPending && (_state.Buttons & AnyButton) == 0 && _device.SetLizardMode(true))
             _lizardPending = false;
-            _device.SetLizardMode(true);
-        }
         if (chords.WakeAt is { } wake)
             _chordTimer.Change(Math.Max(1, (wake - now) * 1000 / Stopwatch.Frequency + 1), Timeout.Infinite);
     }
@@ -253,6 +251,7 @@ internal sealed class ControllerSession : IDisposable
         _pad = pad;
         _last = default;
         _mapped = default; // don't replay input from before a disconnect
+        _camera.Reset(); // nor trackpad motion from mouse mode (e.g. trackball inertia)
         EnsureCameraTicker();
 
         Log.Info($"[{_device.Name}] -> virtual Xbox 360 pad");

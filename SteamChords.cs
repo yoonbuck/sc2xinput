@@ -61,8 +61,9 @@ internal sealed class SteamChords
             _steamDownAt = now;
             _tapUntil = 0; // end a tap still being sent, so two quick taps are two Guide presses
         }
-        // Once Guide is being held, Steam is Guide for the rest of this press: a late chord would
-        // otherwise run its action after the game already saw Guide.
+        // Past the hold time Steam is Guide for the rest of this press, whether or not the wake-up timer
+        // has fired yet: a late chord would otherwise run its action after (or instead of) Guide.
+        if (steam && !_chordUsed && now - _steamDownAt >= HoldTicks) _guideHeld = true;
         if (steam && !_guideHeld)
         {
             foreach (var (button, action) in _chords)
@@ -79,17 +80,15 @@ internal sealed class SteamChords
         long? wakeAt = null;
         if (steam)
         {
-            if (!_chordUsed)
-            {
-                var holdAt = _steamDownAt + HoldTicks;
-                if (now >= holdAt) guide = _guideHeld = true;
-                else wakeAt = holdAt;
-            }
+            if (_guideHeld) guide = true;
+            else if (!_chordUsed) wakeAt = _steamDownAt + HoldTicks;
         }
         else if (_steamHeld)
         {
             _steamHeld = false;
-            if (!_chordUsed && now - _steamDownAt < HoldTicks) _tapUntil = now + TapTicks;
+            // Tap whenever Guide wasn't sent during the press, including a release that beat a late
+            // hold timer; otherwise that press would vanish entirely.
+            if (!_chordUsed && !_guideHeld) _tapUntil = now + TapTicks;
         }
         if (now < _tapUntil)
         {
