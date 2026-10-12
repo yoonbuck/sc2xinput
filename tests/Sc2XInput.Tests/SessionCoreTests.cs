@@ -111,6 +111,26 @@ public class SessionCoreTests
     }
 
     [Fact]
+    public void ReplacementAfterAFailedRestore_RestoresMouseModeOnWake()
+    {
+        // A session faulted while capture was off and couldn't restore mouse mode; its replacement must, once
+        // a report shows no button held.
+        var h = new CoreHarness(captured: false, lizardMayBeOff: true);
+        h.Step(new Connected());
+        Assert.False(h.LizardOn);
+        h.ReportAt(10, B.None);
+        Assert.True(h.LizardOn);
+        Assert.IsType<SessionCore.Mouse>(h.Core.State);
+    }
+
+    [Fact]
+    public void ReplacementAfterAFailedRestore_ClosedBeforeWaking_StillRestores()
+    {
+        var h = new CoreHarness(captured: false, lizardMayBeOff: true);
+        Assert.Equal([new SetLizard(true)], EffectsDuring(h, () => h.Step(new Close())));
+    }
+
+    [Fact]
     public void StartingUncaptured_WakesIntoMouseMode_WithoutPlugging()
     {
         var h = new CoreHarness(captured: false);

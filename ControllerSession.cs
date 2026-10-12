@@ -49,15 +49,19 @@ internal sealed class ControllerSession : IDisposable
     /// <summary>The session closed because of an unexpected exception rather than device loss or shutdown.</summary>
     public bool Faulted { get; private set; }
 
+    /// <summary>After a fault, restoring mouse mode failed too; a replacement session should retry it.</summary>
+    public bool RestoreFailedAfterFault { get; private set; }
+
     /// <summary>Raised on the loop thread whenever <see cref="Status"/> changes.</summary>
     public event Action? Changed;
 
     /// <param name="captured">False to start with capture off, e.g. to keep a paused controller paused across a config reload.</param>
-    public ControllerSession(ScDevice device, ViGEmClient client, Config config, bool captured = true)
+    /// <param name="lizardMayBeOff">A previous session for this device faulted and couldn't restore mouse mode.</param>
+    public ControllerSession(ScDevice device, ViGEmClient client, Config config, bool captured = true, bool lizardMayBeOff = false)
     {
         _device = device;
         _client = client;
-        _core = new SessionCore(config, captured, LogFromCore);
+        _core = new SessionCore(config, captured, LogFromCore, lizardMayBeOff);
         _status = _core.Status;
         _loop = new Thread(Loop) { IsBackground = true, Name = $"session {device.Name}", Priority = ThreadPriority.AboveNormal };
         _hapticWorker = new Thread(RunHaptics) { IsBackground = true, Name = $"haptics {device.Name}" };
@@ -145,7 +149,7 @@ internal sealed class ControllerSession : IDisposable
             Log.Error($"[{_device.Name}] session failed: {ex}");
             Faulted = true;
             Unplug();
-            _device.SetLizardMode(true);
+            RestoreFailedAfterFault = !_device.SetLizardMode(true);
             // The core's current status, not the last published one: events stepped since may have changed
             // the capture choice the replacement session should start with.
             SessionStatus current;

@@ -28,6 +28,7 @@ internal sealed class Bridge
     private volatile KeyValuePair<string, ControllerSession>[] _published = [];
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase); // non-vendor interfaces (keyboard/mouse)
     private readonly HashSet<string> _startUncaptured; // consumed as each device is first seen
+    private readonly HashSet<string> _startLizardMayBeOff = new(StringComparer.OrdinalIgnoreCase); // likewise
     private readonly Dictionary<string, int> _faults = new(StringComparer.OrdinalIgnoreCase);
     private const int MaxFaults = 3; // then a cooldown before the next attempt
     private readonly Dictionary<string, long> _quarantinedUntil = new(StringComparer.OrdinalIgnoreCase);
@@ -77,7 +78,7 @@ internal sealed class Bridge
         var changed = false;
         lock (_sessions)
         {
-            if (_stopped) return;
+            if (_stopped || _stop.IsSet) return; // Stop may have given up waiting for this lock
             var present = Win32.GetHidDevicePaths().Where(ScDevice.IsCandidatePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var doomed = _sessions.Where(s => s.Value.IsClosed || !present.Contains(s.Key)).ToList();
@@ -90,6 +91,7 @@ internal sealed class Bridge
                 // a cooldown that doubles each time (a dongle slot's path never goes away, so "until it's
                 // reconnected" would mean until the dongle is unplugged), rather than flapping a pad every scan.
                 if (!session.Status.Captured) _startUncaptured.Add(path);
+                if (session.RestoreFailedAfterFault) _startLizardMayBeOff.Add(path); // the replacement retries it
                 var faults = _faults[path] = _faults.GetValueOrDefault(path) + 1;
                 if (faults >= MaxFaults)
                 {
@@ -113,6 +115,7 @@ internal sealed class Bridge
 
             foreach (var path in present)
             {
+                if (_stop.IsSet) break; // no new sessions once Stop has begun
                 if (_sessions.ContainsKey(path) || _ignored.Contains(path)) continue;
                 if (_quarantinedUntil.TryGetValue(path, out var until) && now < until) continue;
                 var device = ScDevice.TryOpen(path);
@@ -124,15 +127,16 @@ internal sealed class Bridge
                 Log.Info($"[{device.Name}] found");
                 // Only the first session for a path inherits it: if the device re-enumerates later, it starts
                 // captured like any newly plugged-in controller.
-                var session = new ControllerSession(device, _client, _config, captured: !_startUncaptured.Remove(path));
-                session.Changed += () => Changed?.Invoke();
+                var session = new ControllerSession(device, _client, _config,
+                    captured: !_startUncaptured.Remove(path), lizardMayBeOff: _startLizardMayBeOff.Remove(path));
+                session.Changed += RaiseChanged;
                 _sessions[path] = session;
                 _published = [.. _sessions]; // before Start, so its first status change finds it listed
                 session.Start();
                 changed = true;
             }
         }
-        if (changed) Changed?.Invoke();
+        if (changed) RaiseChanged();
     }
 
     /// <summary>
@@ -160,6 +164,9 @@ internal sealed class Bridge
         // A scan may hold the lock while it closes sessions it is replacing; wait for it within the deadline.
         if (!Monitor.TryEnter(_sessions, Left()))
         {
+            // Don't leave sessions running: ask each published one to close itself (non-blocking; each loop
+            // unplugs and restores mouse mode). The scan sees _stop and won't start new ones.
+            foreach (var session in _published) session.Value.RequestClose();
             Log.Warn("shutdown timed out waiting for the device scan; run sc2xinput --restore if mouse mode is off");
             return;
         }
@@ -177,6 +184,13 @@ internal sealed class Bridge
             Monitor.Exit(_sessions);
         }
         if (_thread != null && _thread != Thread.CurrentThread) _thread.Join(Left());
-        Changed?.Invoke();
+        RaiseChanged();
+    }
+
+    // Raised from the scan thread and session loops; a throwing handler mustn't kill either.
+    private void RaiseChanged()
+    {
+        try { Changed?.Invoke(); }
+        catch (Exception ex) { Log.Warn($"status handler failed: {ex.Message}"); }
     }
 }

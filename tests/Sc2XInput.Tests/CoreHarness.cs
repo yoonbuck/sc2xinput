@@ -32,10 +32,11 @@ internal sealed class CoreHarness
     private bool _closing;
     private bool _plugFailedInBatch;
 
-    public CoreHarness(Config? config = null, bool captured = true)
+    public CoreHarness(Config? config = null, bool captured = true, bool lizardMayBeOff = false)
     {
         Config = config ?? new Config();
-        Core = new SessionCore(Config, captured, (level, text) => Messages.Add((level, text)));
+        Core = new SessionCore(Config, captured, (level, text) => Messages.Add((level, text)), lizardMayBeOff);
+        LizardOn = !lizardMayBeOff;
     }
 
     public IEnumerable<Effect> Effects => Executed.Select(e => e.Effect);
