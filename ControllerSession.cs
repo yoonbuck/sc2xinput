@@ -151,6 +151,8 @@ internal sealed class ControllerSession : IDisposable
                 Log.Info($"[{_device.Name}] capture on");
                 Feedback(1, ScPad.Left, ScPad.Right);
                 break;
+            case ChordAction.CycleRightPadMode when !_captured:
+                break; // nothing to switch while the controller is in mouse/keyboard mode
             case ChordAction.CycleRightPadMode:
                 // Camera -> Stick -> Camera, passing through None only if that's what the config asks for.
                 _rightPadMode = _rightPadMode switch
@@ -300,6 +302,7 @@ internal sealed class ControllerSession : IDisposable
             DisconnectPad();
             // Buttons held when it dropped out are not still held when it wakes.
             _chords.Reset();
+            _camera.Reset(); // also when capture was off, so there was no pad to disconnect
             _rightPadMuted = false;
             Log.Info($"[{_device.Name}] controller disconnected");
             Changed?.Invoke();
@@ -315,7 +318,7 @@ internal sealed class ControllerSession : IDisposable
         catch (Exception ex) { Log.Warn($"[{_device.Name}] virtual pad disconnect failed: {ex.Message}"); }
         _pad = null;
         PlayerIndex = null;
-        _camera?.Reset(); // so a link drop mid-swipe or mid-coast doesn't resume with stale motion
+        _camera.Reset(); // so a link drop mid-swipe or mid-coast doesn't resume with stale motion
         _cameraTicker?.Enabled = false; // a sleeping wireless controller shouldn't keep a 4 ms timer going
         Changed?.Invoke();
     }

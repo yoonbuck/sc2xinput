@@ -78,7 +78,7 @@ The Steam button works as a modifier, like in Steam: hold it and press another b
 | Chord                     | Action                                                        | Confirmation           |
 |---------------------------|---------------------------------------------------------------|------------------------|
 | Steam + Y                 | Toggle capture: unplug the virtual pad and give the controller back its mouse/keyboard mode, or take it back | 2 ticks off, 1 tick on (both pads) |
-| Steam + right pad click   | Switch the right pad between Camera and Stick mode (and `None`, if that's the configured mode). The pad is ignored until you lift your thumb, so the click doesn't jerk the camera | 1 tick camera, 2 ticks stick, 3 ticks none (right pad) |
+| Steam + right pad click   | While captured, switch the right pad between Camera and Stick mode (and `None`, if that's the configured mode). The pad is ignored until you lift your thumb, so the click doesn't jerk the camera | 1 tick camera, 2 ticks stick, 3 ticks none (right pad) |
 
 Steam on its own still works as Guide: a quick tap sends a short Guide press when you let go, and
 holding it for 0.4 s or longer holds Guide until you release (for Xbox long-press shortcuts). Once
