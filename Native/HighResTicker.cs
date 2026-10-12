@@ -42,7 +42,17 @@ internal sealed class HighResTicker : IDisposable
     {
         var handle = CreateWaitableTimerExW(IntPtr.Zero, null, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         if (handle.IsInvalid) // pre-1803 Windows: fall back to a normal-resolution timer
+        {
+            handle.Dispose();
             handle = CreateWaitableTimerExW(IntPtr.Zero, null, 0, TIMER_ALL_ACCESS);
+            if (handle.IsInvalid)
+            {
+                // Fail here rather than on the new thread, where an exception would take down the process.
+                var error = Marshal.GetLastPInvokeError();
+                handle.Dispose();
+                throw new System.ComponentModel.Win32Exception(error, $"{name}: could not create a timer");
+            }
+        }
         var timer = new TimerHandle(handle);
 
         _thread = new Thread(() =>

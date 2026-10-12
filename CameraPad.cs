@@ -9,12 +9,13 @@ internal sealed class CameraPad
 {
     private const double PadRadius = short.MaxValue;
     private const double InertiaStopSpeed = 0.5; // pad radii/s; end the coast instead of creeping along at the anti-deadzone
+    private const double ReportGapSeconds = 0.02; // longer than the 8-12 ms report interval: reports have stopped
     private static readonly double TicksPerSecond = System.Diagnostics.Stopwatch.Frequency;
 
     private readonly Config _config;
     private readonly object _lock = new();
-    // Touch samples covering the smoothing window, oldest first. The first one is the position at or
-    // before the window start (or the touch-down position if the touch is younger than the window).
+    // Touch samples covering the smoothing window ending at the newest sample, oldest first. The first one
+    // is at or before the window start (or is the touch-down position if the touch is younger than that).
     private readonly List<(long t, double x, double y)> _history = [];
     private bool _touched;
     private double _inertiaX, _inertiaY; // pad radii/s, after a flick with trackball enabled
@@ -48,7 +49,6 @@ internal sealed class CameraPad
             {
                 if (_config.CameraTrackball)
                 {
-                    Trim(timestamp);
                     (_inertiaX, _inertiaY) = Velocity(timestamp);
                     _inertiaT = timestamp;
                 }
@@ -66,7 +66,6 @@ internal sealed class CameraPad
             double vx, vy;
             if (_touched)
             {
-                Trim(now);
                 (vx, vy) = Velocity(now);
             }
             else if (_inertiaX != 0 || _inertiaY != 0)
@@ -87,21 +86,36 @@ internal sealed class CameraPad
         }
     }
 
-    private void Trim(long now)
+    private void Trim(long latest)
     {
-        var start = now - Window;
+        var start = latest - Window;
         while (_history.Count >= 2 && _history[1].t <= start) _history.RemoveAt(0);
     }
 
-    // Displacement over the window divided by the full window length: a moving average of velocity,
-    // which also ramps in smoothly from touch-down instead of spiking on the first delta.
+    // Displacement over the window ending at the newest sample, divided by the window length: a moving
+    // average of velocity. The window start is interpolated between the samples around it, so the result
+    // doesn't depend on report cadence (8-12 ms over the dongle), and the window is anchored to the newest
+    // sample rather than to now, so output doesn't ripple between reports. Positions before touch-down read
+    // as the touch-down point, which ramps the speed in instead of spiking on the first delta.
     private (double, double) Velocity(long now)
     {
         if (_history.Count == 0) return (0, 0);
-        var (_, x0, y0) = _history[0];
-        var (_, x1, y1) = _history[^1];
+        var (t1, x1, y1) = _history[^1];
+        var (ta, x0, y0) = _history[0];
+        var start = t1 - Window;
+        if (_history.Count >= 2 && ta < start)
+        {
+            var (tb, xb, yb) = _history[1];
+            var f = (double)(start - ta) / (tb - ta);
+            x0 += (xb - x0) * f;
+            y0 += (yb - y0) * f;
+        }
         var seconds = Window / TicksPerSecond;
-        return ((x1 - x0) / seconds, (y1 - y0) / seconds);
+
+        // If reports stop arriving mid-touch, fade out over a window rather than holding the last speed.
+        var silent = (now - t1) / TicksPerSecond - ReportGapSeconds;
+        var fade = Math.Clamp(1 - silent / seconds, 0, 1);
+        return ((x1 - x0) / seconds * fade, (y1 - y0) / seconds * fade);
     }
 
     private (short, short) ToStick(double vx, double vy)

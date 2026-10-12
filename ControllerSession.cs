@@ -126,8 +126,16 @@ internal sealed class ControllerSession : IDisposable
             _mapped = default;
             if (_camera != null)
             {
-                _cameraTicker ??= new HighResTicker(CameraTickMs, Submit, $"camera {_device.Name}");
-                _cameraTicker.Enabled = true;
+                try
+                {
+                    _cameraTicker ??= new HighResTicker(CameraTickMs, Submit, $"camera {_device.Name}");
+                    _cameraTicker.Enabled = true;
+                }
+                catch (System.ComponentModel.Win32Exception ex)
+                {
+                    // Camera output still updates on every report; it just won't settle between them.
+                    Log.Warn($"[{_device.Name}] {ex.Message}; camera mode will only update on input reports");
+                }
             }
 
             Log.Info($"[{_device.Name}] controller connected -> virtual Xbox 360 pad");
