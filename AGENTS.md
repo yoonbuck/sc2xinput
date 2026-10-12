@@ -17,6 +17,9 @@ tray. Behavior is documented for users in `README.md`.
 - Pure logic, no I/O: `SteamChords.cs` (Steam-button chords and Guide timing), `CameraPad.cs` (right-pad
   camera mode), `Mapper.cs` (Steam Controller → Xbox mapping), `SteamController/ScProtocol.cs` (report
   parsing). Keep these free of thread creation, blocking, clocks and device calls; time is passed in.
+- `SessionCore.cs` (+ `SessionEvents.cs`, `InputTracker.cs`, `OutputStage.cs`): the per-controller logic as a
+  pure state machine, `Step(event, now) → effects`. Not wired into the app yet (see below); covered by
+  scenario tests and a randomized invariant test (`SC2X_FUZZ_SEEDS=5000` for a longer local run).
 - `SteamController/ScDevice.cs`: HID I/O. `Native/`: Win32 interop.
 - `tests/Sc2XInput.Tests`: xunit.v3 tests. `tools/Sc2XInput.DevTools`: hardware diagnostics.
 
@@ -25,9 +28,9 @@ tray. Behavior is documented for users in `README.md`.
 Today `ControllerSession` is touched by several threads (HID reader, chord timer, camera ticker, rumble
 timer, feedback tasks); most of it under one session lock, but the rumble timer, feedback tasks and
 player-index polling run outside it. Most past bugs came from that: state not reset at a transition,
-races, timer callbacks after dispose. A refactor is underway to a single-threaded loop per controller
-with a pure `SessionCore.Step(event, now) → effects` and an explicit lifecycle state; update this section
-when it lands. Until then:
+races, timer callbacks after dispose. A refactor is underway: `SessionCore` exists and is tested, and the
+next step replaces `ControllerSession` with a single-threaded loop that feeds it events and executes its
+effects. Update this section when that lands. Until then:
 
 - Every piece of state derived from input has to be cleared at link loss (`ResetInput`) or when the
   output changes (`ResetOutput`). Add new state to those, not to individual call sites.

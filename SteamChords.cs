@@ -44,6 +44,20 @@ internal sealed class SteamChords
         _tapUntil = 0;
     }
 
+    /// <summary>
+    /// Takes buttons already held when tracking starts (e.g. the first report after the link comes back) as
+    /// held rather than newly pressed: they trigger no chord, and a Steam press whose start was missed
+    /// sends no Guide.
+    /// </summary>
+    public void Prime(ScButtons raw)
+    {
+        Reset();
+        _previous = raw;
+        if ((raw & ScButtons.Steam) == 0) return;
+        _steamHeld = true;
+        _chordUsed = true;
+    }
+
     /// <summary>Call with the raw buttons on every report, and at <see cref="Result.WakeAt"/>. Idempotent for unchanged input.</summary>
     public Result Process(ScButtons raw, long now)
     {

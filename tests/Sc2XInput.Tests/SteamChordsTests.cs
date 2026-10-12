@@ -163,6 +163,19 @@ public class SteamChordsTests
     }
 
     [Fact]
+    public void Prime_TreatsHeldButtonsAsHeld_NotPressed()
+    {
+        var chords = new SteamChords(Bindings);
+        chords.Prime(B.Steam | B.Back);
+        RunWith(chords,
+            new Step(0, B.Steam | B.Back, false, B.Back), // no chord, and no Guide hold from a press we didn't see start
+            new Step(1000, B.Steam | B.Back, false, B.Back),
+            new Step(1100, B.None, false),                // no tap either
+            new Step(1300, B.Steam, false),               // a real press afterwards works normally
+            new Step(1310, B.Steam | B.Back, false, Actions: [ChordAction.ToggleCapture]));
+    }
+
+    [Fact]
     public void NullBindings_DisableChords_SteamIsImmediateGuide() =>
         RunWith(new SteamChords(null), new Step(0, B.Steam, true));
 
