@@ -44,7 +44,7 @@ internal sealed class CoreHarness
 
     public void Step(SessionEvent e)
     {
-        if (e is Disconnected or DeviceLost) _raw = ScButtons.None; // the shell knows nothing about a dropped link
+        // _raw is the physical state as last reported; it stays across link drops, since the buttons do.
         if (e is Input i) _raw = (ScButtons)(i.Report[8] | (i.Report[9] << 8) | (i.Report[10] << 16));
         _closing = e is Close;
         var closedBefore = Core.Status.IsClosed;
@@ -56,7 +56,7 @@ internal sealed class CoreHarness
         var failures = effects.Where(effect => !Execute(effect)).ToList();
         foreach (var effect in failures) Step(new EffectFailed(effect));
 
-        if (e is Tick) Assert.True(Core.NextDeadline is not { } d || d > Now, "deadline not in the future after a tick");
+        Assert.True(Core.NextDeadline is not { } d || d > Now, $"deadline not in the future after {e.GetType().Name}");
         if (Core.State is SessionCore.Asleep or SessionCore.Closed) Assert.Null(Core.NextDeadline);
     }
 
@@ -111,9 +111,10 @@ internal sealed class CoreHarness
     public void Advance(double ms) => AdvanceTo(ToMs(Now) + ms);
 
     /// <summary>Sends an input report at the current time.</summary>
+    /// <param name="lateMs">How long before now the report arrived (the shell stepping it late).</param>
     public void Report(ScButtons buttons = B.None, bool rpad = false, short rx = 0, short ry = 0,
-        short x = 0, short y = 0, byte lt = 0, byte rt = 0) =>
-        Step(new Input(Reports.Make(buttons | (rpad ? B.RPadTouch : 0), lt, rt, x, y, rx, ry), Now));
+        short x = 0, short y = 0, byte lt = 0, byte rt = 0, double lateMs = 0) =>
+        Step(new Input(Reports.Make(buttons | (rpad ? B.RPadTouch : 0), lt, rt, x, y, rx, ry), Now - Ms(lateMs)));
 
     /// <summary>Reports <paramref name="buttons"/> at <paramref name="ms"/> (advancing to it first).</summary>
     public void ReportAt(double ms, ScButtons buttons = B.None, bool rpad = false, short rx = 0, short ry = 0)

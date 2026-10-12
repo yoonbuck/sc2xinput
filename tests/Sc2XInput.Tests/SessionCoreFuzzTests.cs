@@ -48,8 +48,10 @@ public class SessionCoreFuzzTests
         var held = B.None;
         var touch = false;
         short rx = 0, ry = 0;
+        bool guideThisPress = false, chordThisPress = false;
         for (var step = 0; step < 400; step++)
         {
+            var mark = (Executed: h.Executed.Count, Messages: h.Messages.Count);
             h.Advance(rnd.Next(0, 40));
             var roll = rnd.Next(100);
             if (roll < 65)
@@ -59,9 +61,16 @@ public class SessionCoreFuzzTests
                 if (rnd.Next(4) == 0) touch = !touch;
                 rx = (short)Math.Clamp(rx + rnd.Next(-6000, 6001), -32767, 32767);
                 ry = (short)Math.Clamp(ry + rnd.Next(-6000, 6001), -32767, 32767);
+                if ((held & ~before & B.Steam) != 0)
+                {
+                    // A new press; the ticks just before it may have sent the last press's Guide tap.
+                    guideThisPress = chordThisPress = false;
+                    mark = (h.Executed.Count, h.Messages.Count);
+                }
 
                 var captureLogs = h.Messages.Count(m => m.Text.StartsWith("capture o"));
-                h.Report(held, touch, rx, ry);
+                // Sometimes the shell steps a report late (e.g. catching up after a stall).
+                h.Report(held, touch, rx, ry, lateMs: rnd.Next(5) == 0 ? rnd.Next(0, 200) : 0);
                 var toggled = h.Messages.Count(m => m.Text.StartsWith("capture o")) - captureLogs;
                 // Capture only ever toggles on a fresh Y press, at most once per press.
                 Assert.True(toggled == 0 || (held & ~before & B.Y) != 0, $"capture toggled without a new Y press (step {step})");
@@ -71,10 +80,17 @@ public class SessionCoreFuzzTests
             else if (roll < 77) h.Step(new Connected());
             else if (roll < 85) h.Step(new Rumble(h.Generation - rnd.Next(2), (byte)rnd.Next(256), (byte)rnd.Next(256)));
             else if (roll < 90) h.Step(new PlayerIndexResult(h.Generation - rnd.Next(2), rnd.Next(3) == 0 ? null : rnd.Next(4)));
-            else h.Advance(rnd.Next(0, 2000));
+            else if (roll < 99) h.Advance(rnd.Next(0, 2000));
+            else if (rnd.Next(4) == 0) h.Step(rnd.Next(2) == 0 ? new DeviceLost() : new Close()); // rarely: end early
+
+            // A Steam press is either Guide or a chord, never both.
+            guideThisPress |= h.Executed.Skip(mark.Executed).Any(e => e.Effect is Submit s && (s.State.Buttons & XButtons.Guide) != 0);
+            chordThisPress |= h.Messages.Skip(mark.Messages).Any(m => m.Text.StartsWith("capture o") || m.Text.StartsWith("right pad mode"));
+            Assert.False(guideThisPress && chordThisPress, $"one Steam press produced both Guide and a chord (step {step})");
         }
 
-        var awake = h.Core.State is not (SessionCore.Asleep or SessionCore.Closed);
+        if (h.Core.Status.IsClosed) return; // ended early; the harness checked everything on the way
+        var awake = h.Core.State is not SessionCore.Asleep;
         stopFailing();
         h.Step(new Close());
         Assert.True(h.Core.Status.IsClosed);

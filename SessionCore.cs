@@ -67,9 +67,9 @@ internal sealed class SessionCore
     private long? _outputAt;
     private long _plugBackoff = PlugBackoffMin;
     private int _submitFailures, _lizardFailures;
-    // Whether the previous step emitted these. The shell steps EffectFailed right after a failing batch, so
-    // if the next event isn't a failure for them, they succeeded.
-    private bool _submitPending, _plugPending;
+    // Whether the previous step emitted these. The shell steps a batch's failures right after it, so if the
+    // next other event arrives with the flag still set, the effect succeeded.
+    private bool _submitPending, _restorePending;
 
     /// <param name="captured">False to start with capture off (keeps a paused controller paused across a reload).</param>
     public SessionCore(Config config, bool captured = true, Action<LogLevel, string>? log = null)
@@ -138,19 +138,25 @@ internal sealed class SessionCore
     // its pending flag, and the first other event confirms whatever is still pending.
     private void ConfirmPreviousEffects(SessionEvent e)
     {
+        // Close may be stepped ahead of a failure (it bypasses the queue), so it confirms nothing; Shutdown
+        // treats a still-unconfirmed restore as possibly failed.
+        if (e is Close) return;
         if (e is EffectFailed failed)
         {
             if (failed.Effect is Submit) _submitPending = false;
-            if (failed.Effect is PlugPad) _plugPending = false;
+            if (failed.Effect is SetLizard { Enabled: true }) _restorePending = false;
             return;
         }
         if (_submitPending)
         {
             if (_submitFailures > 0) _log(LogLevel.Info, $"virtual pad accepting reports again after {_submitFailures} failures");
             _submitFailures = 0;
+            // Reset only once the pad actually takes a report: a pad that plugs fine but rejects every
+            // report would otherwise be re-created every ~0.7 s forever.
+            _plugBackoff = PlugBackoffMin;
         }
-        if (_plugPending) _plugBackoff = PlugBackoffMin;
-        _submitPending = _plugPending = false;
+        if (_restorePending) _lizardFailures = 0;
+        _submitPending = _restorePending = false;
     }
 
     // Unknown until the first report on this link, e.g. right after reconnecting.
@@ -160,7 +166,7 @@ internal sealed class SessionCore
     {
         _effects.Add(effect);
         if (effect is Submit) _submitPending = true;
-        if (effect is PlugPad) _plugPending = true;
+        if (effect is SetLizard { Enabled: true }) _restorePending = true;
     }
 
     // ---- lifecycle transitions ----
@@ -233,7 +239,8 @@ internal sealed class SessionCore
     private void Shutdown()
     {
         // Give the controller its mouse/keyboard mode back if it might be off, even with buttons held.
-        var lizardMayBeOff = _life is Gamepad or Releasing or Asleep { LizardMayBeOff: true };
+        // Includes a restore emitted in the previous step whose outcome isn't known yet.
+        var lizardMayBeOff = _life is Gamepad or Releasing or Asleep { LizardMayBeOff: true } || _restorePending;
         Unplug();
         if (lizardMayBeOff) Emit(new SetLizard(true));
         _life = new Closed();
@@ -244,6 +251,7 @@ internal sealed class SessionCore
     // they aren't mistaken for new presses when the link comes back.
     private void ResetForLinkLoss()
     {
+        _plugBackoff = PlugBackoffMin;
         _input = new InputTracker(_config, heldBeforeDrop: _input.KnownHeld & AnyButton);
         _output = null;
         _feedback.Clear();
@@ -258,7 +266,9 @@ internal sealed class SessionCore
 
     private void OnInput(Input input, long now)
     {
-        var actions = _input.Apply(input.Report, input.Timestamp);
+        // Chords run on processing time like the rest of the core, so a report stepped late can't cut a
+        // Guide tap short; the camera keeps the report's own timestamp for velocity.
+        var actions = _input.Apply(input.Report, now);
         _output?.Update(_input.State, input.Timestamp);
         foreach (var action in actions) Run(action, now);
         TryRestoreMouseMode(now);
@@ -349,6 +359,7 @@ internal sealed class SessionCore
         if (result.Index is { } index)
         {
             _player = index;
+            _playerPollAt = null;
             _log(LogLevel.Info, $"virtual pad is XInput player {index + 1}");
         }
         else if (--_playerPollsLeft > 0)
@@ -370,6 +381,7 @@ internal sealed class SessionCore
                 _log(LogLevel.Warn, "could not disable lizard mode; trackpad may still move the mouse");
                 break;
             case PlugPad plug when _life is Gamepad && plug.Generation == _padGeneration:
+                _submitPending = false; // the shell skipped the Submit that followed: there was no pad
                 _log(LogLevel.Error, $"could not create the virtual pad; retrying in {_plugBackoff * 1000 / Stopwatch.Frequency} ms");
                 _life = new Gamepad(PadPlugged: false, PlugRetryAt: now + _plugBackoff);
                 _plugBackoff = Math.Min(_plugBackoff * 2, PlugBackoffMax);

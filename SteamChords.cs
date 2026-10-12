@@ -25,6 +25,7 @@ internal sealed class SteamChords
     private ScButtons _previous;
     private ScButtons _latched; // chord buttons, hidden from the game until released
     private bool _steamHeld, _chordUsed, _guideHeld;
+    private bool _missedPressStart; // this Steam press began before tracking did (see Prime)
     private long _steamDownAt, _tapUntil;
 
     /// <param name="Buttons">Buttons the game should see; <see cref="ScButtons.Steam"/> means "press Guide".</param>
@@ -40,14 +41,14 @@ internal sealed class SteamChords
     public void Reset()
     {
         _previous = _latched = ScButtons.None;
-        _steamHeld = _chordUsed = _guideHeld = false;
+        _steamHeld = _chordUsed = _guideHeld = _missedPressStart = false;
         _tapUntil = 0;
     }
 
     /// <summary>
     /// Takes buttons already held when tracking starts (e.g. the first report after the link comes back) as
-    /// held rather than newly pressed: they trigger no chord, and a Steam press whose start was missed
-    /// sends no Guide.
+    /// held rather than newly pressed: they trigger no chord, and a Steam press whose start was missed is
+    /// neither Guide nor a chord until it is released (it may already have been Guide before the link dropped).
     /// </summary>
     public void Prime(ScButtons raw)
     {
@@ -56,6 +57,7 @@ internal sealed class SteamChords
         if ((raw & ScButtons.Steam) == 0) return;
         _steamHeld = true;
         _chordUsed = true;
+        _missedPressStart = true;
     }
 
     /// <summary>Call with the raw buttons on every report, and at <see cref="Result.WakeAt"/>. Idempotent for unchanged input.</summary>
@@ -71,14 +73,14 @@ internal sealed class SteamChords
         if (steam && !_steamHeld)
         {
             _steamHeld = true;
-            _chordUsed = _guideHeld = false;
+            _chordUsed = _guideHeld = _missedPressStart = false;
             _steamDownAt = now;
             _tapUntil = 0; // end a tap still being sent, so two quick taps are two Guide presses
         }
         // Past the hold time Steam is Guide for the rest of this press, whether or not the wake-up timer
         // has fired yet: a late chord would otherwise run its action after (or instead of) Guide.
         if (steam && !_chordUsed && now - _steamDownAt >= HoldTicks) _guideHeld = true;
-        if (steam && !_guideHeld)
+        if (steam && !_guideHeld && !_missedPressStart)
         {
             foreach (var (button, action) in _chords)
             {

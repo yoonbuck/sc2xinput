@@ -34,7 +34,10 @@ internal sealed record PlayerIndexResult(int PadGeneration, int? Index) : Sessio
 /// </summary>
 internal sealed record EffectFailed(Effect Effect) : SessionEvent;
 
-/// <summary>Shut down: unplug and give the controller its mouse/keyboard mode back. Terminal.</summary>
+/// <summary>
+/// Shut down: unplug and give the controller its mouse/keyboard mode back. Terminal. May be stepped ahead of
+/// pending failures; the core then treats an unconfirmed mouse-mode restore as not done.
+/// </summary>
 internal sealed record Close : SessionEvent;
 
 internal abstract record Effect;

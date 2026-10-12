@@ -251,7 +251,17 @@ public class SessionCoreTests
     {
         var h = Connected();
         CaptureOff(h, 0);
+        h.ReportAt(30, B.None); // any later event confirms the restore went through
         Assert.Empty(EffectsDuring(h, () => h.Step(new Close())));
+    }
+
+    [Fact]
+    public void Close_RightAfterARestoreWhoseOutcomeIsUnknown_RestoresAgain()
+    {
+        // The shell may step Close ahead of a pending failure; an unconfirmed restore mustn't count as done.
+        var h = Connected();
+        CaptureOff(h, 0);
+        Assert.Equal([new SetLizard(true)], EffectsDuring(h, () => h.Step(new Close())));
     }
 
     [Fact]
@@ -286,8 +296,8 @@ public class SessionCoreTests
     public void FailedLizardOff_WarnsAndStillPlugs()
     {
         var h = new CoreHarness();
-        var once = true;
-        h.Fail = e => e is SetLizard { Enabled: false } && (once, once = false).once;
+        var failures = 1;
+        h.Fail = e => e is SetLizard { Enabled: false } && failures-- > 0;
         h.Step(new Connected());
         Assert.True(h.PadConnected);
         Assert.Contains(h.Messages, m => m.Level == LogLevel.Warn && m.Text.Contains("lizard"));
@@ -526,6 +536,56 @@ public class SessionCoreTests
         h.ReportAt(10, B.Steam | B.Y);
         h.Step(new Disconnected());
         Assert.Empty(EffectsDuring(h, () => h.AdvanceTo(2000)));
+    }
+
+    [Fact]
+    public void StickMode_ThumbRestingOffCentre_IsIdle()
+    {
+        var h = Connected(new Config { RightPadMode = RightPadMode.Stick });
+        h.Step(new PlayerIndexResult(h.Generation, 0));
+        h.ReportAt(10, B.None, rpad: true, rx: 20000);
+        Assert.True(h.LastSubmitted?.RightX > 0);
+        Assert.Null(h.Core.NextDeadline); // nothing changes until the next report, so no 4 ms ticks
+    }
+
+    [Fact]
+    public void PadModeSwitch_FromAHeldStickPosition_CentresTheStick()
+    {
+        // The old ControllerSession left the virtual stick at the click position here: after the switch the
+        // mapping was all-zero, which matched its reset "last sent" value, so nothing was submitted.
+        var h = Connected(new Config { RightPadMode = RightPadMode.Stick });
+        h.ReportAt(10, B.None, rpad: true, rx: 26000);
+        Assert.Equal(short.MaxValue, h.LastSubmitted?.RightX);
+        h.ReportAt(20, B.Steam, rpad: true, rx: 26000);
+        h.ReportAt(30, B.Steam | B.RPadClick, rpad: true, rx: 26000);
+        Assert.Equal((short)0, h.LastSubmitted?.RightX);
+    }
+
+    [Fact]
+    public void AlwaysFailingSubmits_RecreateThePad_WithGrowingBackoff()
+    {
+        var h = new CoreHarness();
+        h.Fail = e => e is Submit;
+        h.Step(new Connected());
+        h.AdvanceTo(30_000);
+        var plugs = h.Executed.Where(e => e.Effect is PlugPad).Select(e => ToMs(e.At)).ToList();
+        var gaps = plugs.Zip(plugs.Skip(1), (a, b) => b - a).ToList();
+        Assert.True(plugs.Count is > 3 and < 15, $"{plugs.Count} plugs in 30 s");
+        for (var i = 1; i < gaps.Count; i++) Assert.True(gaps[i] >= gaps[i - 1], $"gap {i} shrank: {string.Join(", ", gaps)}");
+    }
+
+    [Fact]
+    public void LateReport_DoesNotShortenAGuideTap()
+    {
+        var h = Connected();
+        h.ReportAt(0, B.Steam);
+        h.AdvanceTo(150);
+        h.Report(B.None, lateMs: 100); // arrived at 50 ms, stepped at 150 ms
+        Assert.Equal(XButtons.Guide, h.LastSubmitted?.Buttons);
+        h.AdvanceTo(249);
+        Assert.Equal(XButtons.Guide, h.LastSubmitted?.Buttons); // the full 100 ms from when it was processed
+        h.AdvanceTo(260);
+        Assert.Equal(XButtons.None, h.LastSubmitted?.Buttons);
     }
 
     [Fact]

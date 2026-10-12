@@ -176,6 +176,19 @@ public class SteamChordsTests
     }
 
     [Fact]
+    public void PrimedSteamPress_RunsNoChord_EvenForAButtonPressedLater()
+    {
+        // Found by the randomized test: Steam held as Guide, link drops, comes back with Steam still held,
+        // then Y: one physical press produced both Guide (before the drop) and a chord (after).
+        var chords = new SteamChords(Bindings);
+        chords.Prime(B.Steam);
+        RunWith(chords,
+            new Step(0, B.Steam, false),
+            new Step(50, B.Steam | B.Back, false, B.Back), // not hidden either: it's a plain press now
+            new Step(100, B.None, false));
+    }
+
+    [Fact]
     public void NullBindings_DisableChords_SteamIsImmediateGuide() =>
         RunWith(new SteamChords(null), new Step(0, B.Steam, true));
 

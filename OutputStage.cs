@@ -47,10 +47,9 @@ internal sealed class OutputStage
     }
 
     /// <summary>
-    /// Whether output can change without new input: camera inertia or fade-out still running, or the last
-    /// report still has the right stick deflected (the centring report hasn't gone out yet).
+    /// Whether output can change without new input: camera inertia or fade-out still running. Nothing else
+    /// moves between reports (a failed submit re-arms its own retry), so an idle stage, including Stick mode
+    /// with the thumb resting off-centre, needs no ticks at all.
     /// </summary>
-    public bool NeedsTicks(long now) =>
-        _mode == RightPadMode.Camera && !Muted && _camera.IsActive(now)
-        || LastSubmitted is not { RightX: 0, RightY: 0 };
+    public bool NeedsTicks(long now) => _mode == RightPadMode.Camera && !Muted && _camera.IsActive(now);
 }
