@@ -24,7 +24,8 @@ internal sealed class Bridge
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase); // non-vendor interfaces (keyboard/mouse)
     private readonly HashSet<string> _startUncaptured; // consumed as each device is first seen
     private readonly Dictionary<string, int> _faults = new(StringComparer.OrdinalIgnoreCase);
-    private const int MaxFaults = 3;
+    private const int MaxFaults = 3; // then a cooldown before the next attempt
+    private readonly Dictionary<string, long> _quarantinedUntil = new(StringComparer.OrdinalIgnoreCase);
     private readonly ManualResetEventSlim _stop = new(false);
     private Thread? _thread;
     private bool _stopped;
@@ -75,17 +76,21 @@ internal sealed class Bridge
             var present = Win32.GetHidDevicePaths().Where(ScDevice.IsCandidatePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var doomed = _sessions.Where(s => s.Value.IsClosed || !present.Contains(s.Key)).ToList();
+            var now = Stopwatch.GetTimestamp();
             foreach (var (path, session) in doomed)
             {
                 _sessions.Remove(path);
                 if (!session.Faulted) continue;
-                // A replacement keeps the user's capture choice. A device that keeps faulting is left alone
-                // until it's plugged in again, rather than flapping a virtual pad every scan.
+                // A replacement keeps the user's capture choice. A device that keeps faulting is left alone for
+                // a cooldown that doubles each time (a dongle slot's path never goes away, so "until it's
+                // reconnected" would mean until the dongle is unplugged), rather than flapping a pad every scan.
                 if (!session.Status.Captured) _startUncaptured.Add(path);
-                if ((_faults[path] = _faults.GetValueOrDefault(path) + 1) >= MaxFaults)
+                var faults = _faults[path] = _faults.GetValueOrDefault(path) + 1;
+                if (faults >= MaxFaults)
                 {
-                    Log.Error($"[{session.Device.Name}] failed {MaxFaults} times; ignoring it until it is reconnected");
-                    _ignored.Add(path);
+                    var cooldown = TimeSpan.FromMinutes(Math.Min(15, Math.Pow(2, faults - MaxFaults)));
+                    Log.Error($"[{session.Device.Name}] failed {faults} times; retrying in {cooldown.TotalMinutes:0} min");
+                    _quarantinedUntil[path] = now + (long)(cooldown.TotalSeconds * Stopwatch.Frequency);
                 }
             }
             if (doomed.Count > 0)
@@ -95,11 +100,16 @@ internal sealed class Bridge
                 changed = true;
             }
             _ignored.IntersectWith(present);
-            foreach (var path in _faults.Keys.Where(p => !present.Contains(p)).ToList()) _faults.Remove(path);
+            foreach (var path in _faults.Keys.Where(p => !present.Contains(p)).ToList())
+            {
+                _faults.Remove(path); // re-plugged: start over
+                _quarantinedUntil.Remove(path);
+            }
 
             foreach (var path in present)
             {
                 if (_sessions.ContainsKey(path) || _ignored.Contains(path)) continue;
+                if (_quarantinedUntil.TryGetValue(path, out var until) && now < until) continue;
                 var device = ScDevice.TryOpen(path);
                 if (device == null)
                 {

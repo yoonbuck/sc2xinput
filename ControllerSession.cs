@@ -18,6 +18,7 @@ namespace Sc2XInput;
 internal sealed class ControllerSession : IDisposable
 {
     private const int QueueWarningDepth = 500;
+    private const int MaxQueuedEvents = 5000; // ~45 s of reports at the dongle's rate
 
     private readonly ScDevice _device;
     private readonly ViGEmClient _client;
@@ -36,6 +37,7 @@ internal sealed class ControllerSession : IDisposable
     private int _padGeneration;
     private bool _plugFailedInBatch;
     private bool _queueWarned;
+    private volatile bool _overflowed; // set by Post (other threads), acted on by the loop
 
     public ScDevice Device => _device;
 
@@ -97,6 +99,14 @@ internal sealed class ControllerSession : IDisposable
 
     private void Post(SessionEvent e)
     {
+        // A loop stuck in a hung driver call mustn't let the queue grow without limit. Once events are
+        // dropped the session's view of held buttons can't be trusted, so the loop faults it when it resumes
+        // and Bridge starts a fresh one. Close and DeviceLost still get through.
+        if (_queue.Count >= MaxQueuedEvents && e is not (DeviceLost or Close))
+        {
+            _overflowed = true;
+            return;
+        }
         _queue.Enqueue(e);
         _queued.Set();
     }
@@ -113,6 +123,7 @@ internal sealed class ControllerSession : IDisposable
             {
                 if (_closeRequested.WaitOne(0)) { Step(new Close()); break; }
 
+                if (_overflowed) throw new InvalidOperationException($"event queue overflowed ({MaxQueuedEvents} events)");
                 WarnIfBackedUp(); // before draining, while a backlog is still visible
                 while (_queue.TryDequeue(out var e))
                 {
@@ -135,7 +146,12 @@ internal sealed class ControllerSession : IDisposable
             Faulted = true;
             Unplug();
             _device.SetLizardMode(true);
-            _status = _status with { Present = false, IsClosed = true };
+            // The core's current status, not the last published one: events stepped since may have changed
+            // the capture choice the replacement session should start with.
+            SessionStatus current;
+            try { current = _core.Status; }
+            catch (Exception) { current = _status; }
+            _status = current with { Present = false, IsClosed = true };
             RaiseChanged();
             return;
         }
