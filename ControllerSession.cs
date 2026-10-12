@@ -19,7 +19,7 @@ internal sealed class ControllerSession : IDisposable
     private readonly ScDevice _device;
     private readonly ViGEmClient _client;
     private readonly Config _config;
-    private readonly ScInputState _state = new();
+    private ScInputState _state = new(); // replaced by ResetInput
     private readonly object _lock = new();
     private readonly System.Threading.Timer? _rumbleTimer;
     private readonly System.Threading.Timer _chordTimer;
@@ -187,6 +187,7 @@ internal sealed class ControllerSession : IDisposable
                     RightPadMode.Stick when _config.RightPadMode == RightPadMode.None => RightPadMode.None,
                     _ => RightPadMode.Camera,
                 };
+                ResetOutput(); // e.g. trackball inertia from Stick mode mustn't carry into Camera mode
                 // The chord is a click with the thumb on the pad; in Stick mode that position would
                 // immediately deflect the stick, so ignore the pad until the thumb lifts.
                 _rightPadMuted = _state.RPadTouched;
@@ -277,9 +278,7 @@ internal sealed class ControllerSession : IDisposable
         pad.LeftThumbX = 0;
         pad.SubmitReport();
         _pad = pad;
-        _last = default;
-        _mapped = default; // don't replay input from before a disconnect
-        _camera.Reset(); // nor trackpad motion from mouse mode (e.g. trackball inertia)
+        ResetOutput(); // no input from before a disconnect, nor trackpad motion from mouse mode
         EnsureCameraTicker();
 
         Log.Info($"[{_device.Name}] -> virtual Xbox 360 pad");
@@ -327,13 +326,35 @@ internal sealed class ControllerSession : IDisposable
             if (!_present) return;
             _present = false;
             DisconnectPad();
-            // Buttons held when it dropped out are not still held when it wakes.
-            _chords.Reset();
-            _camera.Reset(); // also when capture was off, so there was no pad to disconnect
-            _rightPadMuted = false;
+            ResetInput();
             Log.Info($"[{_device.Name}] controller disconnected");
             Changed?.Invoke();
         }
+    }
+
+    // State derived from the input stream lives in several places (raw buttons, chord tracking and its
+    // wake-up timer, camera history, the mute). Every discontinuity has to clear all of it, so both kinds
+    // of reset are named here instead of being repeated at each transition.
+
+    // Caller holds _lock. The input stream was interrupted (link dropped): nothing held before is still
+    // held, and nothing scheduled from it should still fire.
+    private void ResetInput()
+    {
+        _state = new ScInputState();
+        _chordTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        _chords.Reset();
+        _rightPadMuted = false;
+        _camera.Reset();
+    }
+
+    // Caller holds _lock. Where the output goes or what drives the right stick changed (pad plugged in,
+    // right-pad mode switched): nothing computed for the old output may leak into the new one. Input
+    // state is left alone, since buttons can legitimately still be held (e.g. the chord itself).
+    private void ResetOutput()
+    {
+        _last = default;
+        _mapped = default; // recomputed from _state on the next Remap
+        _camera.Reset();
     }
 
     // Caller holds _lock.
