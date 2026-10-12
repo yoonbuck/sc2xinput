@@ -60,23 +60,39 @@ internal static class Program
 
     private static int RecordPad(string file, double seconds)
     {
-        using var output = new StreamWriter(file) { AutoFlush = true };
-        var start = Stopwatch.GetTimestamp();
+        // Record to a temp file and only replace the target if something was captured, so running this with
+        // no awake controller (the dongle exposes its slots regardless) can't wipe an existing fixture.
+        var temp = file + ".recording";
+        var samples = 0;
         var states = new Dictionary<ScDevice, ScInputState>(); // one per controller; the fixture assumes one
-        var gate = new object();
-        var devices = OpenControllers((device, r) =>
+        using (var output = new StreamWriter(temp) { AutoFlush = true })
         {
-            lock (gate)
+            var start = Stopwatch.GetTimestamp();
+            var gate = new object();
+            var devices = OpenControllers((device, r) =>
             {
-                if (!states.TryGetValue(device, out var state)) states[device] = state = new ScInputState();
-                state.Apply(r);
-                var ms = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-                output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{ms:F2},{(state.RPadTouched ? 1 : 0)},{state.RPadX},{state.RPadY}"));
-            }
-        });
-        Thread.Sleep(TimeSpan.FromSeconds(seconds));
-        devices.ForEach(d => d.Dispose());
+                lock (gate)
+                {
+                    if (!states.TryGetValue(device, out var state)) states[device] = state = new ScInputState();
+                    state.Apply(r);
+                    var ms = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+                    output.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{ms:F2},{(state.RPadTouched ? 1 : 0)},{state.RPadX},{state.RPadY}"));
+                    samples++;
+                }
+            });
+            Thread.Sleep(TimeSpan.FromSeconds(seconds));
+            devices.ForEach(d => d.Dispose()); // joins the reader threads, so no more writes after this
+        }
+
+        if (samples == 0)
+        {
+            File.Delete(temp);
+            Console.WriteLine($"no input reports received; {file} left unchanged (is the controller awake?)");
+            return 1;
+        }
+        File.Move(temp, file, overwrite: true);
         if (states.Count > 1) Console.WriteLine("warning: more than one controller reported; rows are interleaved");
+        Console.WriteLine($"wrote {samples} samples to {file}");
         return 0;
     }
 }
