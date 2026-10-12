@@ -72,11 +72,13 @@ internal sealed class SessionCore
     private bool _submitPending, _restorePending;
 
     /// <param name="captured">False to start with capture off (keeps a paused controller paused across a reload).</param>
-    public SessionCore(Config config, bool captured = true, Action<LogLevel, string>? log = null)
+    /// <param name="lizardMayBeOff">The controller may have been left without mouse mode (e.g. a replaced session
+    /// failed to restore it); with capture off, restore it on wake.</param>
+    public SessionCore(Config config, bool captured = true, Action<LogLevel, string>? log = null, bool lizardMayBeOff = false)
     {
         _config = config;
         _log = log ?? ((_, _) => { });
-        _life = new Asleep(captured, LizardMayBeOff: false);
+        _life = new Asleep(captured, lizardMayBeOff);
         _mode = config.RightPadMode;
         _input = new InputTracker(config);
     }

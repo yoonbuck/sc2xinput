@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Nefarius.ViGEm.Client;
 using Sc2XInput.Native;
 using Sc2XInput.SteamController;
@@ -10,19 +11,36 @@ internal readonly record struct ControllerInfo(string Name, int? Player, bool Ca
 internal sealed class Bridge
 {
     private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(2);
+    // Windows gives a console-close / logoff handler ~5 s in total. Stop fits everything (waiting for a scan
+    // in progress, the session loops, device teardown) into one deadline under that.
+    private static readonly TimeSpan StopBudget = TimeSpan.FromSeconds(4.5);
+    // Per session, after its loop has finished: up to 0.2 s for the haptic worker, 1 s for the HID reader
+    // and 0.5 s for the control lock (see ControllerSession.Dispose and ScDevice.Dispose).
+    private static readonly TimeSpan TeardownAllowance = TimeSpan.FromSeconds(1.7);
+    // Sessions a scan replaces get a short close, so one running at shutdown leaves Stop most of its budget.
+    private static readonly TimeSpan ScanCloseBudget = TimeSpan.FromSeconds(1);
 
     private readonly ViGEmClient _client;
     private readonly Config _config;
+    // Owned by the scan (and Stop), under this lock. Readers use _published instead, so the tray never
+    // waits on a scan that is busy closing sessions.
     private readonly Dictionary<string, ControllerSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
+    private volatile KeyValuePair<string, ControllerSession>[] _published = [];
     private readonly HashSet<string> _ignored = new(StringComparer.OrdinalIgnoreCase); // non-vendor interfaces (keyboard/mouse)
+    private readonly HashSet<string> _startUncaptured; // consumed as each device is first seen
+    private readonly HashSet<string> _startLizardMayBeOff = new(StringComparer.OrdinalIgnoreCase); // likewise
+    private readonly Dictionary<string, int> _faults = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxFaults = 3; // then a cooldown before the next attempt
+    private readonly Dictionary<string, long> _quarantinedUntil = new(StringComparer.OrdinalIgnoreCase);
     private readonly ManualResetEventSlim _stop = new(false);
     private Thread? _thread;
     private bool _stopped;
 
-    /// <summary>Raised from background threads whenever a controller connects, disconnects or gets a player slot.</summary>
+    /// <summary>
+    /// Raised from background threads whenever a controller's status changes. Handlers must not block on the
+    /// Bridge (the tray posts to its UI thread).
+    /// </summary>
     public event Action? Changed;
-
-    private readonly HashSet<string> _startUncaptured; // consumed as each device is first seen
 
     /// <param name="uncaptured">Device paths to start with capture off, see <see cref="UncapturedDevices"/>.</param>
     public Bridge(ViGEmClient client, Config config, IReadOnlySet<string>? uncaptured = null)
@@ -33,26 +51,15 @@ internal sealed class Bridge
     }
 
     /// <summary>Device paths of controllers whose capture is off (connected or asleep), to carry over to a new bridge.</summary>
-    public IReadOnlySet<string> UncapturedDevices
-    {
-        get
-        {
-            lock (_sessions)
-                return _sessions.Where(s => !s.Value.IsClosed && !s.Value.IsCaptured) // including asleep ones
-                    .Select(s => s.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        }
-    }
+    public IReadOnlySet<string> UncapturedDevices =>
+        _published.Where(s => s.Value.Status is { IsClosed: false, Captured: false })
+            .Select(s => s.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    public IReadOnlyList<ControllerInfo> Controllers
-    {
-        get
-        {
-            lock (_sessions)
-                return _sessions.Values.Where(s => s.HasController)
-                    .Select(s => new ControllerInfo(s.Device.Name, s.PlayerIndex, s.IsCaptured, s.RightPadMode))
-                    .OrderBy(c => c.Player ?? int.MaxValue).ToList();
-        }
-    }
+    public IReadOnlyList<ControllerInfo> Controllers =>
+        _published.Select(s => (s.Value.Device.Name, Status: s.Value.Status))
+            .Where(s => s.Status.Present)
+            .Select(s => new ControllerInfo(s.Name, s.Status.Player, s.Status.Captured, s.Status.Mode))
+            .OrderBy(c => c.Player ?? int.MaxValue).ToList();
 
     public void Start()
     {
@@ -68,56 +75,148 @@ internal sealed class Bridge
 
     private void Scan()
     {
+        var changed = false;
         lock (_sessions)
         {
-            if (_stopped) return;
+            if (_stopped || _stop.IsSet) return; // Stop may have given up waiting for this lock
             var present = Win32.GetHidDevicePaths().Where(ScDevice.IsCandidatePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var (path, session) in _sessions.ToList())
+            var doomed = _sessions.Where(s => s.Value.IsClosed || !present.Contains(s.Key)).ToList();
+            var now = Stopwatch.GetTimestamp();
+            foreach (var (path, session) in doomed)
             {
-                if (session.IsClosed || !present.Contains(path))
+                _sessions.Remove(path);
+                if (!session.Faulted) continue;
+                // A replacement keeps the user's capture choice. A device that keeps faulting is left alone for
+                // a cooldown that doubles each time (a dongle slot's path never goes away, so "until it's
+                // reconnected" would mean until the dongle is unplugged), rather than flapping a pad every scan.
+                if (present.Contains(path)) // a device that went away starts over, like any newly plugged-in one
                 {
-                    session.Dispose();
-                    _sessions.Remove(path);
+                    if (!session.Status.Captured) _startUncaptured.Add(path);
+                    if (session.RestoreFailedAfterFault) _startLizardMayBeOff.Add(path); // the replacement retries it
+                }
+                var faults = _faults[path] = _faults.GetValueOrDefault(path) + 1;
+                if (faults >= MaxFaults)
+                {
+                    var cooldown = TimeSpan.FromMinutes(Math.Min(15, Math.Pow(2, faults - MaxFaults)));
+                    Log.Error($"[{session.Device.Name}] failed {faults} times; retrying in {cooldown.TotalMinutes:0} min");
+                    _quarantinedUntil[path] = now + (long)(cooldown.TotalSeconds * Stopwatch.Frequency);
                 }
             }
+            if (doomed.Count > 0)
+            {
+                _published = [.. _sessions];
+                CloseAll(doomed.Select(s => s.Value).ToList(), ScanCloseBudget);
+                changed = true;
+            }
             _ignored.IntersectWith(present);
+            foreach (var path in _faults.Keys.Where(p => !present.Contains(p)).ToList())
+            {
+                _faults.Remove(path); // re-plugged: start over
+                _quarantinedUntil.Remove(path);
+            }
 
             foreach (var path in present)
             {
+                if (_stop.IsSet) break; // no new sessions once Stop has begun
                 if (_sessions.ContainsKey(path) || _ignored.Contains(path)) continue;
+                if (_quarantinedUntil.TryGetValue(path, out var until) && now < until) continue;
                 var device = ScDevice.TryOpen(path);
                 if (device == null)
                 {
                     _ignored.Add(path);
                     continue;
                 }
+                if (_stop.IsSet)
+                {
+                    device.Dispose(); // Stop began while this was opening
+                    break;
+                }
                 Log.Info($"[{device.Name}] found");
                 // Only the first session for a path inherits it: if the device re-enumerates later, it starts
                 // captured like any newly plugged-in controller.
-                var session = new ControllerSession(device, _client, _config, captured: !_startUncaptured.Remove(path));
-                session.Changed += () => Changed?.Invoke();
+                var session = new ControllerSession(device, _client, _config,
+                    captured: !_startUncaptured.Remove(path), lizardMayBeOff: _startLizardMayBeOff.Remove(path));
+                session.Changed += RaiseChanged;
                 _sessions[path] = session;
+                _published = [.. _sessions]; // before Start, so its first status change finds it listed
                 session.Start();
+                changed = true;
             }
         }
+        if (changed) RaiseChanged();
     }
 
     /// <summary>
-    /// Disconnects the virtual pads and restores the controllers' mouse/keyboard mode. Synchronous, so it
-    /// is safe to call from handlers after which Windows terminates the process (window close, logoff).
+    /// Closes sessions in parallel: each unplugs its pad, restores mouse mode and closes its device. Waits up
+    /// to <paramref name="loopBudget"/> for their loops plus <see cref="TeardownAllowance"/>.
+    /// </summary>
+    private static void CloseAll(IReadOnlyCollection<ControllerSession> sessions, TimeSpan loopBudget)
+    {
+        foreach (var session in sessions) session.RequestClose();
+        var closing = sessions.Select(s => Task.Run(() => s.Dispose(loopBudget))).ToArray();
+        Task.WaitAll(closing, loopBudget + TeardownAllowance);
+    }
+
+    /// <summary>
+    /// Disconnects the virtual pads and restores the controllers' mouse/keyboard mode. Synchronous and bounded
+    /// by one deadline, so it is safe to call from handlers after which Windows terminates the process
+    /// (window close, logoff).
     /// </summary>
     public void Stop()
     {
+        var deadline = Stopwatch.GetTimestamp() + (long)(StopBudget.TotalSeconds * Stopwatch.Frequency);
+        TimeSpan Left() => TimeSpan.FromSeconds(Math.Max(0, deadline - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency);
+
         _stop.Set();
-        lock (_sessions)
+        // Start every session unplugging and restoring mouse mode now (non-blocking; each loop does it by
+        // itself), rather than after waiting for a scan that may hold the lock.
+        foreach (var session in _published) session.Value.RequestClose();
+        // A scan may hold the lock while it closes sessions it is replacing; wait for it, keeping enough of the
+        // deadline to see the loops finish if it doesn't let go.
+        var lockBudget = Left() - TeardownAllowance;
+        if (!Monitor.TryEnter(_sessions, lockBudget > TimeSpan.Zero ? lockBudget : TimeSpan.Zero))
         {
-            if (_stopped) return;
-            _stopped = true;
-            foreach (var session in _sessions.Values) session.Dispose();
-            _sessions.Clear();
+            Log.Warn("shutdown timed out waiting for the device scan");
+            foreach (var session in _published)
+                if (!session.Value.WaitClosed(Left()))
+                    Log.Warn($"[{session.Value.Device.Name}] session didn't close in time; run sc2xinput --restore if mouse mode is off");
+            // Finish disposing (HID readers, haptic workers) in the background once the scan lets go. The scan
+            // sees _stop and won't start new sessions.
+            Task.Run(() =>
+            {
+                lock (_sessions) CloseAllLocked(TimeSpan.FromSeconds(1));
+                RaiseChanged();
+            });
+            return;
         }
-        if (_thread != null && _thread != Thread.CurrentThread) _thread.Join(ScanInterval);
-        Changed?.Invoke();
+        try
+        {
+            var loopBudget = Left() - TeardownAllowance;
+            CloseAllLocked(loopBudget > TimeSpan.Zero ? loopBudget : TimeSpan.Zero);
+        }
+        finally
+        {
+            Monitor.Exit(_sessions);
+        }
+        if (_thread != null && _thread != Thread.CurrentThread) _thread.Join(Left());
+        RaiseChanged();
+    }
+
+    // Caller holds the _sessions lock.
+    private void CloseAllLocked(TimeSpan loopBudget)
+    {
+        if (_stopped) return;
+        _stopped = true;
+        CloseAll(_sessions.Values.ToList(), loopBudget);
+        _sessions.Clear();
+        _published = [];
+    }
+
+    // Raised from the scan thread and session loops; a throwing handler mustn't kill either.
+    private void RaiseChanged()
+    {
+        try { Changed?.Invoke(); }
+        catch (Exception ex) { Log.Warn($"status handler failed: {ex.Message}"); }
     }
 }

@@ -13,30 +13,37 @@ tray. Behavior is documented for users in `README.md`.
 
 - `Program.cs`: entry point and CLI modes (`--console`, `--dump`, `--restore`).
 - `TrayApp.cs`: tray icon and menu. `Bridge.cs`: finds controllers and owns one session per HID interface.
-- `ControllerSession.cs`: bridges one controller to one virtual pad (capture, lizard mode, rumble, chords).
-- Pure logic, no I/O: `SteamChords.cs` (Steam-button chords and Guide timing), `CameraPad.cs` (right-pad
-  camera mode), `Mapper.cs` (Steam Controller → Xbox mapping), `SteamController/ScProtocol.cs` (report
-  parsing). Keep these free of thread creation, blocking, clocks and device calls; time is passed in.
-- `SessionCore.cs` (+ `SessionEvents.cs`, `InputTracker.cs`, `OutputStage.cs`): the per-controller logic as a
-  pure state machine, `Step(event, now) → effects`. Not wired into the app yet (see below); covered by
-  scenario tests and a randomized invariant test (`SC2X_FUZZ_SEEDS=5000` for a longer local run).
+- `SessionCore.cs` (+ `SessionEvents.cs`, `InputTracker.cs`, `OutputStage.cs`): all per-controller logic
+  (capture, lizard mode, chords, camera, rumble, retries) as a pure state machine, `Step(event, now) →
+  effects`, with an explicit lifecycle (Asleep / Gamepad / Releasing / Mouse / Closed).
+- `ControllerSession.cs`: the shell around it: one loop thread per controller that feeds the core events,
+  carries out its effects (ViGEm, HID commands) and waits for the next event or deadline (`Native/HighResWait.cs`).
+- Pure logic, no I/O: the core files above, `SteamChords.cs` (Steam-button chords and Guide timing),
+  `CameraPad.cs` (right-pad camera mode), `Mapper.cs` (Steam Controller → Xbox mapping),
+  `SteamController/ScProtocol.cs` (report parsing). Keep these free of threads, blocking, clocks and device
+  calls (a test enforces it); time is passed in.
 - `SteamController/ScDevice.cs`: HID I/O. `Native/`: Win32 interop.
 - `tests/Sc2XInput.Tests`: xunit.v3 tests. `tools/Sc2XInput.DevTools`: hardware diagnostics.
 
 ## Architecture and threading
 
-Today `ControllerSession` is touched by several threads (HID reader, chord timer, camera ticker, rumble
-timer, feedback tasks); most of it under one session lock, but the rumble timer, feedback tasks and
-player-index polling run outside it. Most past bugs came from that: state not reset at a transition,
-races, timer callbacks after dispose. A refactor is underway: `SessionCore` exists and is tested, and the
-next step replaces `ControllerSession` with a single-threaded loop that feeds it events and executes its
-effects. Update this section when that lands. Until then:
+Behavior lives in `SessionCore`; `ControllerSession` only translates. Before this design, a session was
+touched by five threads under one lock, and most bugs were state not reset at some transition, races, or
+timer callbacks after dispose. Keep it that way:
 
-- Every piece of state derived from input has to be cleared at link loss (`ResetInput`) or when the
-  output changes (`ResetOutput`). Add new state to those, not to individual call sites.
-- Anything that runs on a timer or background thread must catch its own exceptions; an unhandled one
-  ends the process.
-- Never block or join while holding the session lock; ticks take it.
+- **One owner.** Only the session loop thread touches session state. Other threads (the HID reader, ViGEm's
+  rumble callback) post events; nothing else locks or mutates. Haptic pulses run on a separate worker only
+  because HID writes are slow; it holds no state.
+- **New behavior goes in the core**, as events, effects and deadlines, never as timers or tasks in the shell.
+  Add a scenario test for it; the randomized test checks invariants after every step.
+- **New derived state** belongs in `InputTracker` (lives as long as the link; replaced on link loss) or
+  `OutputStage` (exists only while bridging as a gamepad; rebuilt on plug and mode switch). Transitions
+  construct fresh state rather than resetting fields.
+- **Effect contract:** the shell runs every effect in a batch, skipping a `Submit` whose `PlugPad` failed in
+  that batch, then steps an `EffectFailed` for each failure, in order, before any other event. Success is
+  inferred from the next non-failure event. `Close` skips the queue.
+- The shell catches exceptions from effects and from the core; an unhandled exception on any thread ends
+  the process.
 
 ## Build and test
 

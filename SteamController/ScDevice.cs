@@ -213,10 +213,23 @@ internal sealed unsafe class ScDevice : IDisposable
         if (_disposed) return;
         _stop.Set();
         if (_thread != null && Thread.CurrentThread != _thread) _thread.Join(1000);
-        lock (_ctrlLock)
+        // A feature write stuck in the driver holds _ctrlLock; don't hang shutdown on it. Without the lock the
+        // control handle is left for the process to clean up, and later commands see _disposed and return.
+        if (Monitor.TryEnter(_ctrlLock, TimeSpan.FromMilliseconds(500)))
+        {
+            try
+            {
+                _disposed = true;
+                _ctrlHandle.Dispose();
+            }
+            finally
+            {
+                Monitor.Exit(_ctrlLock);
+            }
+        }
+        else
         {
             _disposed = true;
-            _ctrlHandle.Dispose();
         }
         _readHandle.Dispose();
         _stop.Dispose();
