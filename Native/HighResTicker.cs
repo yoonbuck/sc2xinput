@@ -25,7 +25,18 @@ internal sealed class HighResTicker : IDisposable
     }
 
     private readonly ManualResetEvent _stop = new(false);
+    private readonly ManualResetEvent _enabled = new(true);
     private readonly Thread _thread;
+
+    /// <summary>
+    /// While false the thread parks without timer wakeups. Never blocks, so it is safe to set from code
+    /// holding a lock that the tick callback also takes.
+    /// </summary>
+    public bool Enabled
+    {
+        get => _enabled.WaitOne(0);
+        set { if (value) _enabled.Set(); else _enabled.Reset(); }
+    }
 
     public HighResTicker(int intervalMs, Action tick, string name)
     {
@@ -39,13 +50,29 @@ internal sealed class HighResTicker : IDisposable
             using (timer)
             {
                 var waits = new WaitHandle[] { timer, _stop };
+                var pausedWaits = new WaitHandle[] { _enabled, _stop };
                 var due = -10_000L * intervalMs; // relative, in 100 ns units
+                var failures = 0;
                 while (true)
                 {
                     SetWaitableTimer(handle, due, 0, IntPtr.Zero, IntPtr.Zero, false);
                     if (WaitHandle.WaitAny(waits) == 1) return;
-                    try { tick(); }
-                    catch (Exception ex) { Log.Error($"{name} tick failed: {ex}"); }
+                    if (!_enabled.WaitOne(0) && WaitHandle.WaitAny(pausedWaits) == 1) return;
+                    try
+                    {
+                        tick();
+                        if (failures > 0)
+                        {
+                            Log.Info($"{name} recovered after {failures} failed ticks");
+                            failures = 0;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log only the first of a run: at this rate a persistent error would flood the log.
+                        // Keep ticking, since the cause may be transient.
+                        if (failures++ == 0) Log.Error($"{name} tick failed (repeats suppressed until it recovers): {ex}");
+                    }
                 }
             }
         }) { IsBackground = true, Name = name, Priority = ThreadPriority.AboveNormal };
@@ -57,5 +84,6 @@ internal sealed class HighResTicker : IDisposable
         _stop.Set();
         if (Thread.CurrentThread != _thread) _thread.Join(1000);
         _stop.Dispose();
+        _enabled.Dispose();
     }
 }

@@ -21,7 +21,7 @@ internal sealed class ControllerSession : IDisposable
     private readonly object _lock = new();
     private readonly System.Threading.Timer? _rumbleTimer;
     private readonly CameraPad? _camera;
-    private HighResTicker? _cameraTicker; // started on first connect, so empty dongle slots don't tick
+    private HighResTicker? _cameraTicker; // created on first connect and paused while disconnected, so idle dongle slots don't tick
     private IXbox360Controller? _pad;
     private XState _mapped; // latest mapping of the physical controls; camera output is layered on top
     private XState _last;
@@ -125,7 +125,10 @@ internal sealed class ControllerSession : IDisposable
             _last = default;
             _mapped = default;
             if (_camera != null)
+            {
                 _cameraTicker ??= new HighResTicker(CameraTickMs, Submit, $"camera {_device.Name}");
+                _cameraTicker.Enabled = true;
+            }
 
             Log.Info($"[{_device.Name}] controller connected -> virtual Xbox 360 pad");
             Changed?.Invoke();
@@ -169,6 +172,7 @@ internal sealed class ControllerSession : IDisposable
         catch (Exception ex) { Log.Warn($"[{_device.Name}] virtual pad disconnect failed: {ex.Message}"); }
         _pad = null;
         PlayerIndex = null;
+        _cameraTicker?.Enabled = false; // a sleeping wireless controller shouldn't keep a 4 ms timer going
         Changed?.Invoke();
     }
 
@@ -203,7 +207,6 @@ internal sealed class ControllerSession : IDisposable
 
     public void Dispose()
     {
-        _cameraTicker?.Dispose();
         _rumbleTimer?.Dispose();
         bool hadController;
         lock (_lock)
@@ -212,6 +215,9 @@ internal sealed class ControllerSession : IDisposable
             DisconnectPad();
             IsClosed = true;
         }
+        // After DisconnectPad (which pauses the ticker) so it never touches a disposed one, and outside
+        // the lock because the tick takes it and Dispose joins the thread.
+        _cameraTicker?.Dispose();
         // Give the controller its mouse/keyboard behavior back so it is usable without us.
         if (hadController) _device.SetLizardMode(true);
         _device.Dispose();
