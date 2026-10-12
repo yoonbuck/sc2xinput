@@ -104,7 +104,8 @@ public class SessionCoreFuzzTests
 public class SessionCorePurityTests
 {
     private static readonly string[] CoreFiles =
-        ["SessionCore.cs", "SessionEvents.cs", "InputTracker.cs", "OutputStage.cs", "CameraPad.cs", "SteamChords.cs", "Mapper.cs"];
+        ["SessionCore.cs", "SessionEvents.cs", "InputTracker.cs", "OutputStage.cs", "CameraPad.cs", "SteamChords.cs", "Mapper.cs",
+         Path.Combine("SteamController", "ScProtocol.cs")];
 
     private static readonly string[] Forbidden =
     [

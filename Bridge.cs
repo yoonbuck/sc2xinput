@@ -11,9 +11,14 @@ internal readonly record struct ControllerInfo(string Name, int? Player, bool Ca
 internal sealed class Bridge
 {
     private static readonly TimeSpan ScanInterval = TimeSpan.FromSeconds(2);
-    // Windows gives a console-close / logoff handler ~5 s in total; sessions close in parallel, waiting up
-    // to this for their loops (plus up to ~1.2 s for device teardown).
-    private static readonly TimeSpan StopBudget = TimeSpan.FromSeconds(2);
+    // Windows gives a console-close / logoff handler ~5 s in total. Stop fits everything (waiting for a scan
+    // in progress, the session loops, device teardown) into one deadline under that.
+    private static readonly TimeSpan StopBudget = TimeSpan.FromSeconds(4.5);
+    // Per session, after its loop has finished: up to 0.2 s for the haptic worker, 1 s for the HID reader
+    // and 0.5 s for the control lock (see ControllerSession.Dispose and ScDevice.Dispose).
+    private static readonly TimeSpan TeardownAllowance = TimeSpan.FromSeconds(1.7);
+    // Sessions a scan replaces get a short close, so one running at shutdown leaves Stop most of its budget.
+    private static readonly TimeSpan ScanCloseBudget = TimeSpan.FromSeconds(1);
 
     private readonly ViGEmClient _client;
     private readonly Config _config;
@@ -96,7 +101,7 @@ internal sealed class Bridge
             if (doomed.Count > 0)
             {
                 _published = [.. _sessions];
-                CloseAll(doomed.Select(s => s.Value).ToList(), StopBudget);
+                CloseAll(doomed.Select(s => s.Value).ToList(), ScanCloseBudget);
                 changed = true;
             }
             _ignored.IntersectWith(present);
@@ -131,33 +136,47 @@ internal sealed class Bridge
     }
 
     /// <summary>
-    /// Closes sessions in parallel: each unplugs its pad, restores mouse mode and closes its device. Bounded
-    /// so shutdown fits in the ~5 s Windows allows a console-close or logoff handler.
+    /// Closes sessions in parallel: each unplugs its pad, restores mouse mode and closes its device. Waits up
+    /// to <paramref name="loopBudget"/> for their loops plus <see cref="TeardownAllowance"/>.
     /// </summary>
-    private static void CloseAll(IReadOnlyCollection<ControllerSession> sessions, TimeSpan budget)
+    private static void CloseAll(IReadOnlyCollection<ControllerSession> sessions, TimeSpan loopBudget)
     {
         foreach (var session in sessions) session.RequestClose();
-        var closing = sessions.Select(s => Task.Run(() => s.Dispose(budget))).ToArray();
-        // Dispose waits up to the budget for the loop, then up to ~1.2 s for the haptic and reader threads.
-        Task.WaitAll(closing, budget + TimeSpan.FromSeconds(1.5));
+        var closing = sessions.Select(s => Task.Run(() => s.Dispose(loopBudget))).ToArray();
+        Task.WaitAll(closing, loopBudget + TeardownAllowance);
     }
 
     /// <summary>
-    /// Disconnects the virtual pads and restores the controllers' mouse/keyboard mode. Synchronous, so it
-    /// is safe to call from handlers after which Windows terminates the process (window close, logoff).
+    /// Disconnects the virtual pads and restores the controllers' mouse/keyboard mode. Synchronous and bounded
+    /// by one deadline, so it is safe to call from handlers after which Windows terminates the process
+    /// (window close, logoff).
     /// </summary>
     public void Stop()
     {
+        var deadline = Stopwatch.GetTimestamp() + (long)(StopBudget.TotalSeconds * Stopwatch.Frequency);
+        TimeSpan Left() => TimeSpan.FromSeconds(Math.Max(0, deadline - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency);
+
         _stop.Set();
-        lock (_sessions)
+        // A scan may hold the lock while it closes sessions it is replacing; wait for it within the deadline.
+        if (!Monitor.TryEnter(_sessions, Left()))
+        {
+            Log.Warn("shutdown timed out waiting for the device scan; run sc2xinput --restore if mouse mode is off");
+            return;
+        }
+        try
         {
             if (_stopped) return;
             _stopped = true;
-            CloseAll(_sessions.Values.ToList(), StopBudget);
+            var loopBudget = Left() - TeardownAllowance;
+            CloseAll(_sessions.Values.ToList(), loopBudget > TimeSpan.Zero ? loopBudget : TimeSpan.Zero);
             _sessions.Clear();
             _published = [];
         }
-        if (_thread != null && _thread != Thread.CurrentThread) _thread.Join(ScanInterval);
+        finally
+        {
+            Monitor.Exit(_sessions);
+        }
+        if (_thread != null && _thread != Thread.CurrentThread) _thread.Join(Left());
         Changed?.Invoke();
     }
 }

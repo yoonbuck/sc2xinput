@@ -21,7 +21,9 @@ public class HighResWaitTests
         }
         // The 4 ms camera tick needs better than the default ~15.6 ms timer resolution.
         Assert.True(elapsed.Min() >= 3.5, $"woke early: {elapsed.Min():F2} ms");
-        Assert.True(elapsed.Average() < 8, $"mean {elapsed.Average():F2} ms");
+        // Median, not mean: one unrelated scheduler hiccup on a busy CI runner shouldn't fail it.
+        var median = elapsed.Order().ElementAt(elapsed.Count / 2);
+        Assert.True(median < 8, $"median {median:F2} ms");
     }
 
     [Fact]
