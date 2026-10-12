@@ -11,10 +11,17 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <RootNamespace>Sc2XInput</RootNamespace>
     <AssemblyName>sc2xinput</AssemblyName>
+    <!-- The app lives at the repo root, so keep the test and tool projects out of its default globs. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**;tools/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Nefarius.ViGEm.Client" Version="1.21.256" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Sc2XInput.Tests" />
+    <InternalsVisibleTo Include="sc2xinput-devtools" />
   </ItemGroup>
 
 </Project>
