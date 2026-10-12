@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Sc2XInput.SteamController;
 
 namespace Sc2XInput;
 
@@ -73,6 +74,18 @@ internal sealed class Config
 
     public bool Rumble { get; set; } = true;
     public double RumbleStrength { get; set; } = 1.0;
+
+    /// <summary>
+    /// Steam + button combinations. Keys are Steam Controller buttons (A, B, X, Y, LB, RB, Back, Start,
+    /// LGrip, RGrip, LPadClick, RPadClick, StickClick). Empty disables chords, so Steam presses Guide immediately.
+    /// </summary>
+    public Dictionary<ScButtons, ChordAction> SteamChords { get; set; } = new()
+    {
+        // X, Y and the right pad click send nothing in lizard mode, so pressing them to recapture doesn't
+        // leak a keypress (Back would type Tab).
+        [ScButtons.Y] = ChordAction.ToggleCapture,
+        [ScButtons.RPadClick] = ChordAction.CycleRightPadMode,
+    };
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

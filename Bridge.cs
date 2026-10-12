@@ -4,7 +4,7 @@ using Sc2XInput.SteamController;
 
 namespace Sc2XInput;
 
-internal readonly record struct ControllerInfo(string Name, int? Player);
+internal readonly record struct ControllerInfo(string Name, int? Player, bool Captured, RightPadMode RightPadMode);
 
 /// <summary>Watches for Steam Controllers and keeps one <see cref="ControllerSession"/> per device. Single use.</summary>
 internal sealed class Bridge
@@ -22,10 +22,25 @@ internal sealed class Bridge
     /// <summary>Raised from background threads whenever a controller connects, disconnects or gets a player slot.</summary>
     public event Action? Changed;
 
-    public Bridge(ViGEmClient client, Config config)
+    private readonly HashSet<string> _startUncaptured; // consumed as each device is first seen
+
+    /// <param name="uncaptured">Device paths to start with capture off, see <see cref="UncapturedDevices"/>.</param>
+    public Bridge(ViGEmClient client, Config config, IReadOnlySet<string>? uncaptured = null)
     {
         _client = client;
         _config = config;
+        _startUncaptured = new HashSet<string>(uncaptured ?? new HashSet<string>(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Device paths of controllers whose capture is off (connected or asleep), to carry over to a new bridge.</summary>
+    public IReadOnlySet<string> UncapturedDevices
+    {
+        get
+        {
+            lock (_sessions)
+                return _sessions.Where(s => !s.Value.IsClosed && !s.Value.IsCaptured) // including asleep ones
+                    .Select(s => s.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     public IReadOnlyList<ControllerInfo> Controllers
@@ -34,7 +49,7 @@ internal sealed class Bridge
         {
             lock (_sessions)
                 return _sessions.Values.Where(s => s.HasController)
-                    .Select(s => new ControllerInfo(s.Device.Name, s.PlayerIndex))
+                    .Select(s => new ControllerInfo(s.Device.Name, s.PlayerIndex, s.IsCaptured, s.RightPadMode))
                     .OrderBy(c => c.Player ?? int.MaxValue).ToList();
         }
     }
@@ -78,7 +93,9 @@ internal sealed class Bridge
                     continue;
                 }
                 Log.Info($"[{device.Name}] found");
-                var session = new ControllerSession(device, _client, _config);
+                // Only the first session for a path inherits it: if the device re-enumerates later, it starts
+                // captured like any newly plugged-in controller.
+                var session = new ControllerSession(device, _client, _config, captured: !_startUncaptured.Remove(path));
                 session.Changed += () => Changed?.Invoke();
                 _sessions[path] = session;
                 session.Start();

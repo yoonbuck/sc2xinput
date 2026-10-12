@@ -22,27 +22,30 @@ internal static class Mapper
 
     private static readonly double Sin22_5 = Math.Sin(Math.PI / 8);
 
-    public static XState Map(ScInputState s, Config c)
+    /// <param name="pressed">Buttons to map, normally <c>s.Buttons</c> after Steam-chord filtering.</param>
+    public static XState Map(ScInputState s, ScButtons pressed, Config c, RightPadMode rightPadMode)
     {
+        bool Has(ScButtons b) => (pressed & b) != 0;
+
         var buttons = XButtons.None;
         foreach (var (sc, x) in DirectButtons)
-            if (s.Has(sc)) buttons |= x;
+            if (Has(sc)) buttons |= x;
 
-        if (s.Has(ScButtons.Steam)) buttons |= c.SteamButton;
-        if (s.Has(ScButtons.LGrip)) buttons |= c.LeftGrip;
-        if (s.Has(ScButtons.RGrip)) buttons |= c.RightGrip;
-        if (s.Has(ScButtons.RPadClick)) buttons |= c.RightPadClick;
+        if (Has(ScButtons.Steam)) buttons |= c.SteamButton;
+        if (Has(ScButtons.LGrip)) buttons |= c.LeftGrip;
+        if (Has(ScButtons.RGrip)) buttons |= c.RightGrip;
+        if (Has(ScButtons.RPadClick)) buttons |= c.RightPadClick;
 
-        if (s.LPadTouched && (!c.LeftPadRequiresClick || s.Has(ScButtons.LPadClick)))
+        if (s.LPadTouched && (!c.LeftPadRequiresClick || Has(ScButtons.LPadClick)))
             buttons |= DPad(s.LPadX, s.LPadY, c.LeftPadDeadzone);
 
-        var lt = s.Has(ScButtons.LTFull) ? (byte)255 : s.LeftTrigger;
-        var rt = s.Has(ScButtons.RTFull) ? (byte)255 : s.RightTrigger;
+        var lt = Has(ScButtons.LTFull) ? (byte)255 : s.LeftTrigger;
+        var rt = Has(ScButtons.RTFull) ? (byte)255 : s.RightTrigger;
 
         var (lx, ly) = Radial(s.StickX, s.StickY, c.StickDeadzone, 1.0);
 
         short rx = 0, ry = 0;
-        if (c.RightPadMode == RightPadMode.Stick && s.RPadTouched)
+        if (rightPadMode == RightPadMode.Stick && s.RPadTouched)
             (rx, ry) = Radial(s.RPadX, s.RPadY, c.RightPadDeadzone, c.RightPadSensitivity);
 
         return new XState(buttons, lt, rt, lx, ly, rx, ry);
