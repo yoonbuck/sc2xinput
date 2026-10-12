@@ -90,8 +90,11 @@ internal sealed class Bridge
                 // A replacement keeps the user's capture choice. A device that keeps faulting is left alone for
                 // a cooldown that doubles each time (a dongle slot's path never goes away, so "until it's
                 // reconnected" would mean until the dongle is unplugged), rather than flapping a pad every scan.
-                if (!session.Status.Captured) _startUncaptured.Add(path);
-                if (session.RestoreFailedAfterFault) _startLizardMayBeOff.Add(path); // the replacement retries it
+                if (present.Contains(path)) // a device that went away starts over, like any newly plugged-in one
+                {
+                    if (!session.Status.Captured) _startUncaptured.Add(path);
+                    if (session.RestoreFailedAfterFault) _startLizardMayBeOff.Add(path); // the replacement retries it
+                }
                 var faults = _faults[path] = _faults.GetValueOrDefault(path) + 1;
                 if (faults >= MaxFaults)
                 {

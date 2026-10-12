@@ -7,8 +7,9 @@ namespace Sc2XInput.Native;
 /// <summary>
 /// Waits for any of a set of handles or a deadline, whichever comes first, with ~1 ms precision. Uses a
 /// high-resolution waitable timer: plain timeouts round to ~15.6 ms, and Windows 11 ignores timeBeginPeriod
-/// for processes without a visible window (like a tray app). Falls back to plain timeouts if the timer
-/// can't be created or armed. Not thread-safe; owned by one loop.
+/// for processes without a visible window (like a tray app). Falls back to a normal-resolution timer if a
+/// high-resolution one can't be created, and to plain timeouts if no timer can be created or armed.
+/// Not thread-safe; owned by one loop.
 /// </summary>
 internal sealed class HighResWait : IDisposable
 {
@@ -30,10 +31,14 @@ internal sealed class HighResWait : IDisposable
     private readonly TimerHandle? _timer;
     private int _armFailures;
 
+    /// <summary>Whether a high-resolution timer was obtained (Windows 10 1803+), so deadlines are met to ~1 ms.</summary>
+    public bool IsHighResolution { get; }
+
     public HighResWait(string name)
     {
         _name = name;
         var handle = CreateWaitableTimerExW(IntPtr.Zero, null, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        IsHighResolution = !handle.IsInvalid;
         if (handle.IsInvalid) // pre-1803 Windows: fall back to a normal-resolution timer
         {
             handle.Dispose();

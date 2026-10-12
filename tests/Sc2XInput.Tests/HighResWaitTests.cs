@@ -11,6 +11,8 @@ public class HighResWaitTests
     public void Deadline_IsMetToTheMillisecond_NotTheSystemTick()
     {
         using var wait = new HighResWait("test");
+        // The fallback (pre-1803 Windows) is supported but only as precise as the system tick.
+        Assert.SkipUnless(wait.IsHighResolution, "no high-resolution timer on this system");
         using var never = new ManualResetEvent(false);
         var elapsed = new List<double>();
         for (var i = 0; i < 20; i++)
