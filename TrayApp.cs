@@ -113,12 +113,14 @@ internal sealed class TrayApp : ApplicationContext
     {
         var controllers = _bridge?.Controllers ?? [];
         var state = _bridge == null ? IconState.Paused : controllers.Any(c => c.Captured) ? IconState.Active : IconState.Waiting;
-        _tray.Text = state switch
+        var text = state switch
         {
             IconState.Paused => "sc2xinput: paused",
             IconState.Waiting when controllers.Count == 0 => "sc2xinput: no controllers",
             _ => "sc2xinput: " + string.Join(", ", controllers.Select(ShortStatus)),
         };
+        // NotifyIcon.Text throws above 127 characters, which 8+ controllers can reach.
+        _tray.Text = text.Length <= 127 ? text : text[..126] + "…";
         SetIcon(state);
         if (_menu.Visible) RefreshMenu();
     }

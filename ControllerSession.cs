@@ -30,6 +30,8 @@ internal sealed class ControllerSession : IDisposable
     private bool _present;        // a physical controller is connected (always true when wired)
     private bool _captured;       // false: the user handed the controller back to mouse/keyboard mode
     private bool _lizardPending;  // capture turned off; restore mouse/keyboard mode once all buttons are up
+    private long _lizardRetryAt;  // after a failed restore, don't retry before this timestamp
+    private int _lizardFailures;
     private bool _rightPadMuted;  // right pad ignored until the thumb lifts, after switching its mode
     private RightPadMode _rightPadMode;
     private XState _mapped; // latest mapping of the physical controls; camera output is layered on top
@@ -108,25 +110,50 @@ internal sealed class ControllerSession : IDisposable
         var now = Stopwatch.GetTimestamp();
         var chords = _chords.Process(_state.Buttons, now);
         foreach (var action in chords.Actions) Run(action);
-        if (_rightPadMuted && !_state.RPadTouched) _rightPadMuted = false;
+        if (_rightPadMuted && !_state.RPadTouched)
+        {
+            _rightPadMuted = false;
+            _camera.Reset(); // or a trackball flick from the muted touch would coast on after the lift
+        }
         _mapped = Mapper.Map(_state, chords.Buttons, _config, _rightPadMuted ? RightPadMode.None : _rightPadMode);
         // Enabling mouse/keyboard mode while a button is held makes the firmware type that button's key
-        // (Back is Tab), so wait until the chord has been fully released.
-        // Stays pending until the commands go through, so a transient failure is retried on the next report.
-        if (_lizardPending && (_state.Buttons & AnyButton) == 0 && _device.SetLizardMode(true))
-            _lizardPending = false;
+        // (Back is Tab), so wait until the chord has been fully released. It stays pending until the
+        // commands go through; a failing attempt costs several retries, so space them out.
+        if (_lizardPending && (_state.Buttons & AnyButton) == 0 && now >= _lizardRetryAt)
+        {
+            if (_device.SetLizardMode(true))
+            {
+                _lizardPending = false;
+                _lizardFailures = 0;
+            }
+            else
+            {
+                if (_lizardFailures++ == 0)
+                    Log.Warn($"[{_device.Name}] could not restore mouse/keyboard mode, retrying");
+                _lizardRetryAt = now + Stopwatch.Frequency / 2;
+            }
+        }
         if (chords.WakeAt is { } wake)
             _chordTimer.Change(Math.Max(1, (wake - now) * 1000 / Stopwatch.Frequency + 1), Timeout.Infinite);
     }
 
     private void OnChordTimer()
     {
-        lock (_lock)
+        // Timer callbacks have no outer handler, and an exception here would end the process; Submit can
+        // throw if ViGEm fails (e.g. the bus driver restarted).
+        try
         {
-            if (IsClosed) return;
-            Remap();
+            lock (_lock)
+            {
+                if (IsClosed) return;
+                Remap();
+            }
+            Submit();
         }
-        Submit();
+        catch (Exception ex)
+        {
+            Log.Error($"[{_device.Name}] chord timer failed: {ex.Message}");
+        }
     }
 
     // Caller holds _lock.
@@ -138,6 +165,7 @@ internal sealed class ControllerSession : IDisposable
                 _captured = false;
                 DisconnectPad();
                 _lizardPending = true;
+                _lizardRetryAt = 0;
                 Log.Info($"[{_device.Name}] capture off: controller is back in mouse/keyboard mode");
                 Feedback(2, ScPad.Left, ScPad.Right);
                 Changed?.Invoke();
