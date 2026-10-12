@@ -35,7 +35,11 @@ internal sealed class HighResTicker : IDisposable
     /// </summary>
     public bool Enabled
     {
-        get => Volatile.Read(ref _disposed) == 0 && _enabled.WaitOne(0);
+        get
+        {
+            try { return Volatile.Read(ref _disposed) == 0 && _enabled.WaitOne(0); }
+            catch (ObjectDisposedException) { return false; } // the worker disposed it after Dispose
+        }
         set
         {
             if (Volatile.Read(ref _disposed) != 0) return;

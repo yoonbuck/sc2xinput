@@ -23,7 +23,7 @@ internal sealed class CameraPad
 
     public CameraPad(Config config) => _config = config;
 
-    private long Window => (long)(Math.Max(1, _config.CameraSmoothingMs) / 1000 * TicksPerSecond);
+    private long Window => (long)(Math.Clamp(_config.CameraSmoothingMs, 1, 1000) / 1000 * TicksPerSecond);
 
     /// <summary>Forget the touch and any trackball motion, e.g. when the controller disconnects mid-swipe.</summary>
     public void Reset()
@@ -148,7 +148,7 @@ internal sealed class CameraPad
 
         // Start just past the game's deadzone so slow, precise movements still register.
         var anti = Math.Clamp(_config.CameraAntiDeadzone, 0, 0.95);
-        var magnitude = anti + (1 - anti) * Math.Min(1, speed * _config.CameraSensitivity);
+        var magnitude = anti + (1 - anti) * Math.Min(1, speed * Math.Max(0, _config.CameraSensitivity));
         // ...but fade in over [threshold, 2 * threshold] rather than jumping straight there, so a resting
         // thumb hovering around the threshold stays inside the game's deadzone instead of twitching past it.
         if (speed < 2 * threshold) magnitude *= (speed - threshold) / threshold;

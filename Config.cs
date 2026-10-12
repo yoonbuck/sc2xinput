@@ -27,12 +27,13 @@ internal enum XButtons : ushort
 
 internal enum RightPadMode
 {
-    /// <summary>Finger speed drives the stick, like Steam's Joystick Mouse: swipes turn the camera, a still finger stops it.</summary>
-    Camera,
     /// <summary>Finger position on the pad is the stick position.</summary>
     Stick,
     /// <summary>Right pad does nothing (e.g. if you only want the stick).</summary>
     None,
+    // Added last so the numeric values of the older modes don't change.
+    /// <summary>Finger speed drives the stick, like Steam's Joystick Mouse: swipes turn the camera, a still finger stops it.</summary>
+    Camera,
 }
 
 internal sealed class Config
