@@ -5,7 +5,8 @@ using Sc2XInput.Native;
 
 namespace Sc2XInput.SteamController;
 
-internal enum ScPad : byte { Left = 0, Right = 1 }
+/// <summary>Trackpad to pulse, as the firmware numbers them (right first).</summary>
+internal enum ScPad : byte { Right = 0, Left = 1 }
 
 /// <summary>
 /// One Steam Controller vendor HID interface: the wired controller, or one of the four
@@ -194,7 +195,10 @@ internal sealed unsafe class ScDevice : IDisposable
     /// <summary>Asks the dongle to report whether a controller is connected to this slot.</summary>
     public void RequestConnectionStatus() => SendCommand([ScProtocol.CmdRequestCommStatus]);
 
-    /// <summary>Repeated haptic pulse: on/off times in microseconds, repeated <paramref name="count"/> times.</summary>
+    /// <summary>
+    /// Repeated haptic pulse: on/off times in microseconds, repeated <paramref name="count"/> times. Strength comes
+    /// from the on-time; the firmware ignores the command's gain field.
+    /// </summary>
     public void HapticPulse(ScPad pad, ushort onUs, ushort offUs, ushort count)
     {
         Span<byte> p = stackalloc byte[10];
