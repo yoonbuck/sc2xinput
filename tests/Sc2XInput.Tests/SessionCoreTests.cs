@@ -381,10 +381,47 @@ public class SessionCoreTests
         var h = Connected();
         var gen = h.Generation;
         var start = EffectsDuring(h, () => h.Step(new Rumble(gen, 255, 0)));
-        Assert.Equal(ScPad.Left, Assert.IsType<Haptic>(Assert.Single(start)).Pad);
-        Assert.Equal(2, EffectsDuring(h, () => h.Advance(100)).OfType<Haptic>().Count());
+        Assert.Equal(2, start.OfType<Haptic>().Count());
+        Assert.Equal(4, EffectsDuring(h, () => h.Advance(100)).OfType<Haptic>().Count());
         h.Step(new Rumble(gen, 0, 0));
         Assert.Empty(EffectsDuring(h, () => h.Advance(200)).OfType<Haptic>());
+    }
+
+    [Fact]
+    public void Rumble_AMotorAloneDrivesBothPads_BothMotorsSplitLargeLeftSmallRight()
+    {
+        var h = Connected();
+        var gen = h.Generation;
+        Haptic[] Pulses(byte large, byte small) =>
+            [.. EffectsDuring(h, () => { h.Step(new Rumble(gen, large, small)); h.Advance(50); }).OfType<Haptic>().TakeLast(2)];
+
+        var largeOnly = Pulses(255, 0);
+        Assert.Equal([ScPad.Left, ScPad.Right], largeOnly.Select(p => p.Pad));
+        Assert.All(largeOnly, p => Assert.Equal((2000, 12_500), (p.OnUs, p.OnUs + p.OffUs))); // 80 Hz, full strength
+
+        var smallOnly = Pulses(0, 255);
+        Assert.Equal([ScPad.Left, ScPad.Right], smallOnly.Select(p => p.Pad));
+        Assert.All(smallOnly, p => Assert.Equal((1500, 5000), (p.OnUs, p.OnUs + p.OffUs))); // 200 Hz, full strength
+
+        var both = Pulses(255, 1);
+        Assert.Equal((ScPad.Left, 12_500), (both[0].Pad, both[0].OnUs + both[0].OffUs));
+        Assert.Equal((ScPad.Right, 5000), (both[1].Pad, both[1].OnUs + both[1].OffUs));
+        Assert.InRange((int)both[1].OnUs, 250, 260); // the weakest level is still felt
+    }
+
+    [Theory]
+    [InlineData(0.5)]
+    [InlineData(1.0)]
+    [InlineData(2.0)]
+    public void Rumble_StrengthRisesWithLevel_AndRumbleStrengthScalesIt(double rumbleStrength)
+    {
+        var h = Connected(new Config { RumbleStrength = rumbleStrength });
+        var gen = h.Generation;
+        var onTimes = new[] { 1, 64, 128, 192, 255 }.Select(level =>
+            EffectsDuring(h, () => { h.Step(new Rumble(gen, (byte)level, 0)); h.Advance(50); }).OfType<Haptic>().First().OnUs).ToList();
+        Assert.All(onTimes.Zip(onTimes.Skip(1)), p => Assert.True(p.Second > p.First || p.Second == 2000, $"{p.First} -> {p.Second}"));
+        Assert.All(onTimes, on => Assert.InRange((int)on, 250, 2000));
+        Assert.Equal(rumbleStrength >= 1 ? 2000 : 707, (int)onTimes[^1]); // half strength: halfway on the geometric scale
     }
 
     [Fact]

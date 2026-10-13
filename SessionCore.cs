@@ -43,8 +43,13 @@ internal sealed class SessionCore
     private static readonly long PlayerPollInterval = Ms(100);
     private const int PlayerPolls = 20;
     private const int SubmitFailuresBeforeReplug = 50;
-    private const ushort LargeMotorPeriodUs = 10_000; // ~100 Hz thump on the left pad
-    private const ushort SmallMotorPeriodUs = 4_000;  // ~250 Hz buzz on the right pad
+    // Rumble, tuned on hardware. Each trackpad actuator has resonances: 80 Hz is the strongest low "thump" and
+    // 200 Hz a strong buzz, while 40-60 Hz is weak and 120 Hz barely registers. Strength comes from the on-time
+    // of each pulse, barely felt at ~100 µs and plateauing at 1.5-2 ms (and weaker near 50% duty), so level maps
+    // geometrically onto a range that stays noticeable. Both periods divide RumbleTick, so a re-issued train
+    // roughly continues the rhythm; trains overlap, so timing jitter leaves no gap.
+    private static readonly RumbleMotor LargeMotor = new(PeriodUs: 12_500, MinOnUs: 250, MaxOnUs: 2000); // 80 Hz
+    private static readonly RumbleMotor SmallMotor = new(PeriodUs: 5_000, MinOnUs: 250, MaxOnUs: 1500);  // 200 Hz
 
     // Physical buttons; excludes the touch/status bits that share the field.
     private const ScButtons AnyButton = (ScButtons)0x7FFFFF & ~(ScButtons.LPadTouch | ScButtons.RPadTouch);
@@ -443,20 +448,31 @@ internal sealed class SessionCore
     }
 
     // XInput rumble is a level that games set and forget, but the Steam Controller only does finite pulse
-    // trains, so re-issue short trains every RumbleTick while a motor is on.
+    // trains, so re-issue short trains every RumbleTick while a motor is on. A pad plays one train at a time:
+    // a motor on its own drives both pads (one-sided rumble feels wrong when the game meant the whole
+    // controller); with both on, they split like an Xbox controller's, large on the left and small on the right.
     private void EmitRumble()
     {
-        Drive(ScPad.Left, _largeMotor, LargeMotorPeriodUs);
-        Drive(ScPad.Right, _smallMotor, SmallMotorPeriodUs);
+        (RumbleMotor Motor, byte Level) large = (LargeMotor, _largeMotor), small = (SmallMotor, _smallMotor);
+        var (left, right) = (_largeMotor, _smallMotor) switch
+        {
+            (0, _) => (small, small),
+            (_, 0) => (large, large),
+            _ => (large, small),
+        };
+        Drive(ScPad.Left, left.Motor, left.Level);
+        Drive(ScPad.Right, right.Motor, right.Level);
     }
 
-    private void Drive(ScPad pad, byte level, ushort periodUs)
+    private void Drive(ScPad pad, RumbleMotor motor, byte level)
     {
-        if (level == 0) return;
-        var duty = Math.Clamp(level / 255.0 * _config.RumbleStrength, 0, 1);
-        var on = (ushort)Math.Max(1, periodUs / 2 * duty);
-        var off = (ushort)(periodUs - on);
-        var count = (ushort)Math.Ceiling(RumbleTick * 1000.0 / Stopwatch.Frequency * 1000 * 1.5 / periodUs); // overlap the next train
+        var strength = Math.Clamp(level / 255.0 * _config.RumbleStrength, 0, 1);
+        if (!(strength > 0)) return; // also NaN
+        var on = (ushort)Math.Round(motor.MinOnUs * Math.Pow((double)motor.MaxOnUs / motor.MinOnUs, strength));
+        var off = (ushort)(motor.PeriodUs - on);
+        var count = (ushort)Math.Ceiling(RumbleTick * 1000.0 / Stopwatch.Frequency * 1000 * 1.5 / motor.PeriodUs); // overlap the next train
         Emit(new Haptic(pad, on, off, count));
     }
+
+    private sealed record RumbleMotor(ushort PeriodUs, ushort MinOnUs, ushort MaxOnUs);
 }

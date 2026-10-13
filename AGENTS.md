@@ -64,6 +64,8 @@ and check with the user, using `tools/Sc2XInput.DevTools`
 
 - `xinput`: what games see, including Guide (uses `XInputGetStateEx`; plain `XInputGetState` hides Guide).
 - `rumble <large> <small> <ms>`: drives rumble through XInput.
+- `haptics <segment>...`: plays pulse trains straight to the trackpads (app not running), for tuning
+  haptics by feel without rebuilding.
 - `inputlog`: controller button edges plus keyboard/mouse input coming from the controller itself, on one
   timeline. Shows lizard-mode keys and any keypresses leaking during capture toggles.
 - `record-pad`: right-pad samples to CSV for new fixtures.
@@ -109,3 +111,8 @@ restores mouse mode.
   but is documented to throw.
 - Windows 11 ignores `timeBeginPeriod` for windowless processes; use high-resolution waitable timers.
 - The ◀/▶ buttons are Back/Start in code and config.
+- Haptics: the firmware numbers the pads right = 0, left = 1, and ignores the pulse command's dB gain and
+  "both pads" value. Strength comes only from each pulse's on-time, which plateaus after ~1.5-2 ms (and
+  weakens near 50% duty). Each actuator resonates unevenly: 80 Hz and 160-200 Hz are strong, 120 Hz barely
+  registers. A pulse train builds into a rumble; single pulses sent one command at a time (e.g. random timing
+  for "noise") feel weak and tappy. See the rumble constants in `SessionCore`.

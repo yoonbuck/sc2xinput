@@ -73,6 +73,8 @@ internal sealed class Config
     public double StickDeadzone { get; set; } = 0.0;
 
     public bool Rumble { get; set; } = true;
+
+    /// <summary>Multiplies the motor levels games send; above 1 makes weak rumble stronger, capped at full.</summary>
     public double RumbleStrength { get; set; } = 1.0;
 
     /// <summary>

@@ -72,7 +72,7 @@ prompt. Ctrl+C in that terminal still stops it.
 | Left pad (click)      | D-pad, 8-way                     |
 | Right pad (+ click)   | Right stick, camera-style: swipe speed sets deflection (R3) |
 | Left / right grip     | L3 / R3                          |
-| Rumble                | Haptic pulses (large motor → left pad, small → right) |
+| Rumble                | Trackpad haptics: large motor a low 80 Hz rumble, small motor a 200 Hz buzz. One motor alone uses both pads; with both on, large is on the left pad and small on the right |
 
 ## Steam button chords
 
@@ -118,7 +118,7 @@ Tab/Escape, the grips are F7/F9, the stick click is F4, the left pad clicks are 
   - `Stick`: finger position on the pad is the stick position. Tuned with `RightPadDeadzone` and
     `RightPadSensitivity` (above 1 reaches full deflection before your thumb hits the pad's edge).
   - `None`.
-- `Rumble`, `RumbleStrength`.
+- `Rumble`, `RumbleStrength` (scales the motor levels games send; above 1 makes weak rumble stronger, capped at full).
 - `SteamChords`: map of Steam Controller button → action, e.g. `{ "Y": "ToggleCapture", "RPadClick": "CycleRightPadMode" }`.
   Buttons: `A B X Y LB RB Back Start LGrip RGrip StickClick LPadClick RPadClick` (`Back`/`Start` are the ◀/▶ buttons). Actions: `ToggleCapture`,
   `CycleRightPadMode`, `None`. Set it to `{}` to turn chords off, so Steam presses Guide immediately.

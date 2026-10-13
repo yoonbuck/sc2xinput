@@ -14,6 +14,9 @@ internal static class Program
 
           xinput [seconds]                 print XInput state changes for all slots, including Guide (default 60 s)
           rumble <large> <small> <ms>      rumble every connected XInput slot (motor levels 0-255)
+          haptics <segment>...             play pulse trains straight to the trackpads (app not running), to
+                                           tune haptics by feel. Segment: pads:hz:onUs:ms, e.g. LR:80:2000:1000
+                                           (pads L, R or LR; on-time per pulse sets strength), or -:ms to pause.
           inputlog [seconds]               Steam Controller button edges + keyboard/mouse input coming from the
                                            controller itself, on one timeline (default 120 s). Use with capture
                                            off to map what each button sends in mouse/keyboard mode, or with
@@ -35,6 +38,7 @@ internal static class Program
             case "xinput": return XInput.Watch(Seconds(1, 60));
             case "rumble" when args.Length == 4 && int.Parse(args[3]) >= 0:
                 return XInput.Rumble(byte.Parse(args[1]), byte.Parse(args[2]), int.Parse(args[3]));
+            case "haptics" when args.Length >= 2: return Haptics.Run(args.Skip(1));
             case "inputlog": return InputLog.Run(Seconds(1, 120));
             case "record-pad" when args.Length >= 2: return RecordPad(args[1], Seconds(2, 60));
             default:
